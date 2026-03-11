@@ -1,0 +1,33 @@
+{
+	"name": "smart-order-list",
+	"version": "1.0.2",
+	"description": "Smartly auto-styles and manages standard/nested lists in Obsidian.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json",
+		"postversion": "git push && git push --tags",
+		"lint": "eslint ."
+	},
+	"keywords": [],
+	"license": "0-BSD",
+	"devDependencies": {
+		"@eslint/js": "9.30.1",
+		"@types/node": "^16.11.6",
+		"esbuild": "0.25.5",
+		"eslint-plugin-obsidianmd": "0.1.9",
+		"globals": "14.0.0",
+		"jiti": "2.6.1",
+		"tslib": "2.4.0",
+		"typescript": "^5.8.3",
+		"typescript-eslint": "8.35.1"
+	},
+	"dependencies": {
+		"@codemirror/language": "^6.12.2",
+		"@codemirror/state": "^6.5.4",
+		"@codemirror/view": "^6.39.16",
+		"obsidian": "latest"
+	}
+}

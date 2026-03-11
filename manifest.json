@@ -1,0 +1,11 @@
+{
+	"id": "smart-order-list",
+	"name": "Smart Order List",
+	"version": "1.0.2",
+	"minAppVersion": "0.15.0",
+	"description": "Smartly auto-styles and manages standard/nested lists in Obsidian.",
+	"author": "Howe",
+	"authorUrl": "https://github.com/Howe-Ren",
+	"fundingUrl": "",
+	"isDesktopOnly": false
+}
