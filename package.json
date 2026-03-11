@@ -1,6 +1,6 @@
 {
 	"name": "smart-order-list",
-	"version": "1.0.2",
+	"version": "1.0.0",
 	"description": "Smartly auto-styles and manages standard/nested lists in Obsidian.",
 	"main": "main.js",
 	"type": "module",
