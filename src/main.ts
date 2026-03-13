@@ -4,10 +4,18 @@ import { keymap, EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate }
 import { syntaxTree } from '@codemirror/language';
 import { SyntaxNode } from '@lezer/common';
 
-// --- CORE REGEX PATTERNS ---
-const LIST_PATTERN = "([0-9a-zA-Z]+(?:\\.[0-9a-zA-Z]+)+\\.?|[0-9a-zA-Z]+\\.|\\([0-9]+\\)|[一二三四五六七八九十]+、)";
-const PREFIX_REGEX = new RegExp(`^([ \\t]*)([-*+]\\s+)?${LIST_PATTERN}\\s+(.*)$`);
-const SPACE_REGEX = new RegExp(`^([ \\t]*)([-*+]\\s+)?${LIST_PATTERN}$`);
+// --- CORE REGEX PATTERNS (Updated for strict limitations) ---
+// 1. One Alphabet per digit (aa. is forbidden) & Numeral combinations
+const MIX_COMPONENT = "(?:[0-9]+|[a-zA-Z])";
+// 2. Prefix max digits: 4 (e.g., 1.a.2.b is max)
+const MIXED_LIST = `(?:${MIX_COMPONENT}(?:\\.${MIX_COMPONENT}){1,3}\\.?|${MIX_COMPONENT}\\.)`;
+// 3. Complete List Pattern supporting Chinese and Parenthesized
+const LIST_PATTERN = `(${MIXED_LIST}|\\([0-9]+\\)|[一二三四五六七八九十]+、)`;
+// 4. Exception: Checkbox list could live with all inline Ordered lists (not the bullet list)
+const MARKER_REGEX = "([-*+]\\s+\\[[ xX]\\]\\s+)?";
+
+const PREFIX_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}\\s+(.*)$`);
+const SPACE_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}$`);
 
 // --- CHINESE NUMERAL DICTIONARY ---
 const ZH_DIGITS =['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
@@ -81,16 +89,15 @@ function getIndentLevel(line: string): number {
     return Math.floor(spaces.length / 4);
 }
 
-// --- UPDATED CONSECUTION RULES ---
 function isConsecutionBreaker(text: string): boolean {
     if (text.trim() === '') return false; 
     
-    // RESTORED: Code blocks explicitly break list consecution
-    if (/^([ \t]*)(```|~~~)/.test(text)) return true;
+    // Strict Exit Mechanisms Triggers
+    if (/^([ \t]*)(```|~~~)/.test(text)) return true; // Parallel Codeblock
+    if (/^([ \t]*)#+\s/.test(text)) return true; // Heading
+    if (/^([ \t]*)(---|___|\*\*\*)/.test(text)) return true; // Dividing Line
     
-    if (/^([ \t]*)#+\s/.test(text)) return true;
-    if (/^([ \t]*)(---|___|\*\*\*)/.test(text)) return true;
-    
+    // Unordered List Trigger (Break on Bullet list, but respect inline Smart Checkbox lists)
     const isUnordered = /^([ \t]*)([-*+])\s+/.test(text);
     const isSmartList = PREFIX_REGEX.test(text);
     if (isUnordered && !isSmartList) return true;
@@ -442,10 +449,10 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
                         if (level <= targetIndentLevel) { prevListLine = lineText; break; }
                     }
                     
-                    const isPureUnordered = /^([ \t]*)([-*+])\s+/.test(prevListLine) && !PREFIX_REGEX.test(prevListLine);
+                    const isPureUnordered = /^([ \t]*)([-*+]\s+\[[ xX]\]|[-*+])\s+/.test(prevListLine) && !PREFIX_REGEX.test(prevListLine);
                     if (isPureUnordered) {
-                        const marker = prevListLine.match(/^([ \t]*)([-*+])\s+/)?.[2];
-                        const currMatch = (match[2] || '').match(new RegExp(`^([-*+]\\s+)?${LIST_PATTERN}\\s+(.*)$`));
+                        const marker = prevListLine.match(/^([ \t]*)([-*+]\s+\[[ xX]\]|[-*+])\s+/)?.[2];
+                        const currMatch = (match[2] || '').match(new RegExp(`^([-*+]\\s+\\[[ xX]\\]\\s+)?${LIST_PATTERN}\\s+(.*)$`));
                         if (marker && currMatch) {
                             newText = newIndent + marker + ' ' + (currMatch[3] || '');
                             convertedToUnordered = true;
@@ -506,7 +513,7 @@ export default class SmartOrderListPlugin extends Plugin {
                 if (!text) { new Notice("Please select the list you want to format first."); return; }
                 
                 const lines = text.split('\n');
-                const result = [];
+                const result =[];
                 let currentTokens: Token[] =[];
                 let currentIndent = -1;
 
