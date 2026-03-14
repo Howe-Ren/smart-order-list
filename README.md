@@ -1,12 +1,3 @@
-### instance 
-1.A 1 (Manual style first)
-1.B 2 (Primary Smart List)
-1.C 3 (Consecutive List)
-- 4 (Consecution Exit Mechanism)
-1.1 5 (Shuffle initial and manual prefix)
-	1.1.1 6 (Numerals first, Smart Nested List)
-1.2 7 (Auto refresh)
-
 ### Insight 
 ---
 1. Parallel Principle 
@@ -28,22 +19,29 @@
 	- Supporting
 		1. Numerals (prior)
 			- [-] Normal, <span style="color:grey">0</span>-9 #mixable 
+				- Numeral without `.` doesn't trigger List  
 			- [-] Parenthesized, <span style="color:grey">(0)</span>-(9)
-		1. Alphabet 
+		2. Alphabet 
 			- [-] Uppercase, A-Z #mixable 
 			- [-] Lowercase, a-z #mixable 
-		1. Chinese numerals 
+		3. Chinese numerals 
 			- [-] Classic, 一、... 九、
-		1. Roman Numerals 
+		4. ~~Roman Numerals~~ #suspend 
+			- note: treat as normal texts 
+			- Suspend: The complex interaction of triggering Roman numerals via specific `Space + Enter` sequences is extremely difficult to reliably capture within CodeMirror's transaction-based state engine, as the auto-formatting engine and keystroke events constantly fight each other. Taking your advice, **we will suspend the complex Roman toggle mechanics** for now to ensure the core features remain rock-solid. Basic Roman consecutive counting will still work if typed out (e.g., `III.`), but the auto-magic toggle is removed.
 			- [ ] Classic, I-II...
 				- Initial "I."  unrelates consecutive "H. ", inline: 
-					- `Space` > **Alphabet** 
-						- `Enter` > **Roman** (Roman Numeral font style)
-							- `Enter` > step forward  (upgrade list level) 
+					- [-] `Space` > **Alphabet** (shuffle to "A/a")
+					- [ ] `Space` + `Enter` > **Roman** 
+						- Only if `Enter` right behind `Space`, even if inline content exists. Otherwise, `Enter` trigger Alphabet consecution e.g. `Enter` behind inline content. 
+						- #issue `Enter` turned Alphabet ("A") to Roman, but suddenly auto-back to Alphabet ("A") 
+					- [ ] `Space` + double `Enter` > step forward  (upgrade inline list level) 
 				- Initial "I." beneath consecutive "H. ", next-line: 
 					- Single `Enter` > **Alphabet** 
 					- Double `Enter` > **Roman**
 					- Triple `Enter` > step forward  (upgrade list level) 
+				- Conclusion
+					- [ ] Alphabet first, Roman second activated only by `Enter` right behind prefix's `Space` 
 	- Limitation 
 		- [-] One Alphabet per digit e.g. "a.a "
 		- [-] Prefix max digits: 4
@@ -65,28 +63,100 @@
 	- **==Exit== Mechanism** triggers 
 		- Parallel **Codeblock "\`\`\`", "\~\~\~"**
 			- [-] Cut off Consecution (external) 
-			- [ ] Ban to respect Raw Codes (internal) 
+			- [-] Ban to respect Raw Codes (internal) 
+				- Cancel Numeral indention  e.g. the new next line after "1. "
 		- [-] **Headling "###"** 
 		- [-] **Dividing Line "---"** 
 		- Unordered List 
 			- [-] **Bullet list**
-			- [-] **Checkbox list** 
+			- [-] **Checkbox list**, Note: except the Ordered list within Checkbox list (mixture) 
 	- **==Maintain== Mechanism** 
 		- [-] **Plain Line** (nonList)
 ---
 # List Type 
 
-| Num | Ordered  | Unordered |
-| --- | -------- | --------- |
-| 1   | Numeral  | Bullet    |
-| 2   | Alphabet | Checkbox  |
-| 3   | Chinese  |           |
-| 4   | Roman    |           |
+| Num | Ordered         | Unordered |
+| --- | --------------- | --------- |
+| 1   | Numeral         | Bullet    |
+| 2   | Alphabet        | Checkbox  |
+| 3   | Chinese         |           |
+
 ## debug for mixture of Checkbox (hotkey) and Ordered lists 
-| front/behind    | Checkbox                    | Numeral | Alphabet        | Chinese         | Roman (invalid) |
-| --------------- | --------------------------- | ------- | --------------- | --------------- | --------------- |
-| Numeral         | 0 (grey-ground unavailable) | -       | -               | -               | -               |
-| Alphabet        | 0 (auto switch)             | -       | -               | -               | -               |
-| Chinese         | 0 (auto switch)             | -       | -               | -               | -               |
-| Roman (invalid) | 0                           | -       | -               | -               | -               |
-| Checkbox        | -                           | 1       | 0 (auto switch) | 0 (auto switch) | 0               |
+| front/behind | Checkbox             | Numeral           | Alphabet          | Chinese           |
+| ------------ | -------------------- | ----------------- | ----------------- | ----------------- |
+| Numeral      | #resolved instance_1 | -                 | -                 | -                 |
+| Alphabet     | #resolved instance_2 | -                 | -                 | -                 |
+| Chinese      | #resolved instance_3 | -                 | -                 | -                 |
+| Checkbox     | -                    | #error instance_4 | #error instance_5 | #error instance_6 |
+### instance_1
+---
+#### step_0
+- [ ] 1. test1
+- [ ] 2. test2
+#### step_1
+- append `Enter`
+#### outcome 
+- [ ] 1. test
+- [ ] 
+#### issue
+1. Numeral prefix "1." grey-ground unavailable
+2. next line's prefix lost
+
+### instance_2
+---
+#### step_0
+- [ ] a. test1
+- [ ] b. test2
+#### step_1
+- append `Space`
+#### outcome
+- [ ] 1. 
+#### issue 
+- Alphabet turned Numeral
+
+### instance_3
+---
+#### step_0
+- [ ] 一、 test1
+- [ ] 二、 test2
+#### step_1
+- append `Space`
+#### outcome
+- [ ] 1. 
+#### issue 
+- Chinese turned Numeral 
+
+### instance_4
+---
+#### step_0
+1. [ ] test
+#### step_1
+- append `Enter`
+#### outcome
+1. [ ] test
+- [ ] 2. 
+#### issue
+- in next line, the prefix list style switched
+
+### instance_5
+---
+#### step_0
+a. 
+#### step_1
+- append Checkbox 
+#### outcome 
+- [ ] a. 
+#### issue
+- the prefix list style switched
+
+### instance_6
+---
+#### step_0
+一、 
+#### step_1
+- append Checkbox 
+#### outcome
+- [ ] 一、 
+#### issue
+- the prefix list style switched
+
