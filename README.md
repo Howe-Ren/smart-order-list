@@ -1,3 +1,9 @@
+## Preview
+![README preview](assets\2026-0316_0312.png)
+
+---
+---
+
 ### Insight 
 ---
 1. Parallel Principle 
