@@ -58,7 +58,7 @@
 			- [-] It's usually triggered by **Unorder list** and **Numeral list** ==hotkeys==, which effect the existing prefix instantly.
 			- [-] Meanwhile, if inserting `Space` ahead of the existing prefix before the addition, the former one should be **saved** as ==normal text== without grey-background  which wouldn't trigger consecutive list neither anymore. 
 		- Exception 
-			- **Checkbox list** could live with all inline **Ordered lists** (not the **bullet list**) 
+			- **Checkbox list** could live with all inline **Ordered lists** (not the **Bullet list**) 
 				- [ ] #issue check [[README#debug for mixture of Checkbox and Ordered lists]]
 	- **==Exit== Mechanism** triggers 
 		- Parallel **Codeblock "\`\`\`", "\~\~\~"**
@@ -73,90 +73,105 @@
 	- **==Maintain== Mechanism** 
 		- [-] **Plain Line** (nonList)
 ---
-# List Type 
+# List Type supported 
 
-| Num | Ordered         | Unordered |
-| --- | --------------- | --------- |
-| 1   | Numeral         | Bullet    |
-| 2   | Alphabet        | Checkbox  |
-| 3   | Chinese         |           |
+| Num | Ordered      | Unordered |
+| --- | ------------ | --------- |
+| 1   | Numeral (2)  | Bullet    |
+| 2   | Alphabet (2) | Checkbox  |
+| 3   | Chinese (1)  |           |
 
-## debug for mixture of Checkbox (hotkey) and Ordered lists 
-| front/behind | Checkbox             | Numeral           | Alphabet          | Chinese           |
-| ------------ | -------------------- | ----------------- | ----------------- | ----------------- |
-| Numeral      | #resolved instance_1 | -                 | -                 | -                 |
-| Alphabet     | #resolved instance_2 | -                 | -                 | -                 |
-| Chinese      | #resolved instance_3 | -                 | -                 | -                 |
-| Checkbox     | -                    | #error instance_4 | #error instance_5 | #error instance_6 |
-### instance_1
+## mixture of Checkbox (hotkey) and Ordered list 
+| front/behind | Checkbox               | Numeral                         | Alphabet              | Chinese                |
+| ------------ | ---------------------- | ------------------------------- | --------------------- | ---------------------- |
+| Numeral      | #resolved instance_1.1 | -                               | -                     | -                      |
+| Alphabet     | #resolved instance_1.2 | -                               | -                     | -                      |
+| Chinese      | #resolved instance_1.3 | -                               | -                     | -                      |
+| Checkbox     | -                      | #resolved #native  instance_2.1 | #abandon instance_2.2 | #abandon  instance_2.3 |
+### 1. {Checkbox}` `{Ordered list}
+- Note:
+	- Native Obsidian doesn't support inline **Ordered list** prefix after **Checkbox** at all, even for **Numeral** 
+- Consecution
+	- both **Checkbox** and **Ordered list** are maintained 
+- Checkbox Exit method: 
+	1. Cursor #safe
+		1.1 Key combination: double `Home` > `Ctrl` + `Shift` + triple `→` > `Delete` 
+		1.2 Mouse: manually locat and delete the **source code** of **Checkbox** 
+	2. Hotkey: 
+		2.1 **Numeral list** hotkey (`Toggle numbered list` in Obsidian)
+			- #safe would ==keep== **Ordered lists** as normal text, ==losing== **Checkbox**  
+		1.1 **Bullet list** hotkey (`Toggle bullet list` in Obsidian)
+			- #risk would ==lose both== **Ordered list** and **Checkbox** 
+#### 1.1 {Checkbox}` `{Numeral}
 ---
-#### step_0
+##### step_0
 - [ ] 1. test1
-- [ ] 2. test2
-#### step_1
+##### step_1
 - append `Enter`
-#### outcome 
-- [ ] 1. test
-- [ ] 
-#### issue
-1. Numeral prefix "1." grey-ground unavailable
-2. next line's prefix lost
-
-### instance_2
----
-#### step_0
-- [ ] a. test1
-- [ ] b. test2
-#### step_1
-- append `Space`
-#### outcome
-- [ ] 1. 
-#### issue 
-- Alphabet turned Numeral
-
-### instance_3
----
-#### step_0
-- [ ] 一、 test1
-- [ ] 二、 test2
-#### step_1
-- append `Space`
-#### outcome
-- [ ] 1. 
-#### issue 
-- Chinese turned Numeral 
-
-### instance_4
----
-#### step_0
-1. [ ] test
-#### step_1
-- append `Enter`
-#### outcome
-1. [ ] test
+##### outcome 
+- [ ] 1. test1
 - [ ] 2. 
-#### issue
-- in next line, the prefix list style switched
 
-### instance_5
+#### 1.2 {Checkbox}` `{Alphabet}
 ---
-#### step_0
-a. 
-#### step_1
-- append Checkbox 
-#### outcome 
+##### step_0
+- [ ] a. test1
+##### step_1
+- append `Enter`
+##### outcome
+- [ ] a. test1
+- [ ] b. 
+
+#### 1.3 {Checkbox}` `{Chinese}
+---
+##### step_0
+- [ ] 一、 test1
+##### step_1
+- append `Enter` 
+##### outcome
+- [ ] 一、 test1
+- [ ] 二、 
+
+### 2. {Ordered list}` `{Checkbox}
+- Note: 
+	- In Markdown, a checkbox [ ] **must** immediately follow a recognized list marker (-, \*, +, or 1.). Because a. and 一、 are not native markers, forcing the text to a. [ ] test causes broken behaviors. 
+- Consecution 
+	- both **Ordered list** and **Checkbox** are maintained 
+- Checkbox Exit method: 
+	1. Cursor #safe 
+		1.1 Key combination: `Home` > `Ctrl` + `Shift` + double `←` > `Delete` 
+		1.2 Mouse: manually locat and delete **source code** of **Checkbox** 
+	2. Hotkey: 
+		2.1 **Numeral list** hotkey (`Toggle numbered list` in Obsidian)
+			- #risk in **{Numeral}` `{Checkbox}**, would ==lose both== **Ordered list** and **Checkbox** 
+		1.1 **Bullet list** hotkey (`Toggle bullet list` in Obsidian)
+			- #risk would ==lose both== **Ordered list** and **Checkbox** 
+#### 2.1 {Numeral}` `{Checkbox}
+1. [ ] test1
+2. [ ] test2
+> 1. In original Obsidian, **Numeral list** could ==overwrite== all list prefixes  
+> 2. **Checkbox** could only ==append== behind all list prefixes  
+
+#### 2.2 {Alphabet}` `{Checkbox}
 - [ ] a. 
-#### issue
-- the prefix list style switched
 
-### instance_6
----
-#### step_0
-一、 
-#### step_1
-- append Checkbox 
-#### outcome
+#### 2.3 {Chinese}` `{Checkbox}
 - [ ] 一、 
-#### issue
-- the prefix list style switched
 
+---
+#### #issue Bullet list style error nested after other list styles 
+##### instance
+- 1
+	- 2
+		- 3
+			1. 4
+				1.1 5
+					1.1.1 6
+						1.1.1.1 7
+						- 8
+					- 9
+				- 10
+			- 11
+		- 12
+	- 13
+- 14
