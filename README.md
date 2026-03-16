@@ -1,5 +1,5 @@
 ## Preview
-![README preview](assets\2026-0317_0251.png)
+![README preview](assets/2026-0317_0251.png)
 
 
 ### Insight 
