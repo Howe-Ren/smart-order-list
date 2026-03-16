@@ -6,19 +6,13 @@ import { SyntaxNode } from '@lezer/common';
 
 // --- CORE REGEX PATTERNS (Strict Limitations Enforced) ---
 
-// 1. One Alphabet per digit (aa. is forbidden) & Numeral combinations
 const MIX_COMP = "(?:[0-9]+|[a-zA-Z])";
-// 2. Prefix max digits: 4.
 const SINGLE_ITEM = `(?:${MIX_COMP}\\.)`;
 const MULTI_ITEM = `(?:${MIX_COMP}(?:\\.${MIX_COMP}){1,3}\\.?)`;
-// Negative lookahead prevents a 5th digit or invalid multi-letters from matching
 const MIXED_LIST = `(?:${MULTI_ITEM}|${SINGLE_ITEM})(?!\\.?(?:[0-9]+|[a-zA-Z]+))`;
 
-// 3. Complete List Pattern supporting Chinese and Parenthesized
 const LIST_PATTERN = `(${MIXED_LIST}|\\([0-9]+\\)|[一二三四五六七八九十]+、)`;
-// 4. Markers include Unordered, Checkbox, and Numeral (to catch bad mixtures and rewrite them)
-const MARKER_REGEX = "([-*+]\\s+\\[[ xX]\\]\\s+|[-*+]\\s+|[0-9]+\\.\\s+)?";
-
+const MARKER_REGEX = "([-*+]\\s+\\[[ xX]\\]\\s+|[-*+]\\s+)?";
 const PREFIX_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}\\s+(.*)$`);
 const SPACE_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}$`);
 
@@ -54,17 +48,6 @@ interface Token {
 }
 
 const SmartListSync = Annotation.define<boolean>();
-
-// HIGHLY OPTIMIZED EXIT MECHANISM: O(1) Top-Down Codeblock Ban using Syntax Tree
-function isPosInCodeBlock(state: EditorState, pos: number): boolean {
-    const tree = syntaxTree(state);
-    for (let n: SyntaxNode | null = tree.resolveInner(pos, 1); n; n = n.parent) {
-        if (n.name.includes("code") || n.name.includes("hmd-codeblock") || n.name.includes("frontmatter")) {
-            return true;
-        }
-    }
-    return false;
-}
 
 function parseTokens(prefix: string): Token[] {
     if (!prefix) return[];
@@ -109,6 +92,17 @@ function getIndentLevel(line: string): number {
     return Math.floor(spaces.length / 4);
 }
 
+function isLineInFencedCode(state: EditorState, lineNum: number): boolean {
+    let inCode = false;
+    for (let i = 1; i <= lineNum; i++) {
+        if (/^([ \t]*)(```|~~~)/.test(state.doc.line(i).text)) {
+            if (i === lineNum) return true; 
+            inCode = !inCode;
+        }
+    }
+    return inCode;
+}
+
 function isConsecutionBreaker(text: string): boolean {
     if (text.trim() === '') return false; 
     if (/^([ \t]*)(```|~~~)/.test(text)) return true; 
@@ -122,22 +116,16 @@ function isConsecutionBreaker(text: string): boolean {
     return false; 
 }
 
-// --- PREFIX REWRITE MECHANISM (Simplified & Robust) ---
+// --- PREFIX REWRITE MECHANISM ---
 function rewritePrefix(indent: string, marker: string, prefix: string, content: string): { changed: boolean, newText: string } {
-    // Single List Style Rule: If a user hotkeys a pure bullet or a numeral list onto a smart list, strip the smart prefix!
     const isPureBullet = /^[-*+]\s+$/.test(marker);
-    const isNumeralMarker = /^[0-9]+\.\s+$/.test(marker);
-    
-    if (isPureBullet || isNumeralMarker) {
+    if (isPureBullet) {
         return { changed: true, newText: `${indent}${marker}${content}` };
     }
-    
-    // Checkbox arrays (- [ ] a. ) are natively valid in our MARKER_REGEX, so they pass through unchanged.
     return { changed: false, newText: "" };
 }
 
 function getNextTokens(userTokens: Token[], currentTokens: Token[], currentIndent: number, indentLevel: number): Token[] {
-    // FIX 2.4: Shuffle manual initial prefix natively forces value to 1 (e.g. p. -> a.)
     if (currentTokens.length === 0) {
         return userTokens.map(t => ({ ...t, value: 1 }));
     }
@@ -182,7 +170,7 @@ function getNextTokens(userTokens: Token[], currentTokens: Token[], currentInden
     return (isConsistentStyle || isArtifact) ? expectedTokens : [...userTokens];
 }
 
-// --- LIVE PREVIEW DECORATOR ---
+// --- LIVE PREVIEW DECORATOR (Cleaned & Optimized) ---
 const listMarkerDecorator = ViewPlugin.fromClass(class {
     decorations: DecorationSet;
     constructor(view: EditorView) { this.decorations = this.buildDecorations(view); }
@@ -194,28 +182,21 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
             let pos = from;
             while (pos <= to) {
                 const line = view.state.doc.lineAt(pos);
-                if (!isPosInCodeBlock(view.state, line.from)) {
+                if (!isLineInFencedCode(view.state, line.number)) {
                     const match = line.text.match(PREFIX_REGEX);
                     if (match) {
                         const indent = match[1] || '';
                         const marker = match[2] || '';
                         const prefix = match[3] || '';
-                        
                         const start = line.from + indent.length + marker.length;
+                        
                         const isNativeOrdered = /^[0-9]+\.$/.test(prefix) && marker === '';
 
-                        if (!isNativeOrdered && (!line.text.startsWith(' ') || line.text.match(/^(\t| {4})/))) {
+                        if (!isNativeOrdered) {
+                            const depth = getIndentLevel(line.text) + 1;
+                            const visualDepth = ((depth - 1) % 3) + 1; 
                             builder.add(start, start + prefix.length + 1, Decoration.mark({ 
-                                class: "cm-list-1 cm-formatting cm-formatting-list cm-formatting-list-ol" 
-                            }));
-                        }
-                    } else {
-                        // FIX: Visual styling for orphan bullet lists nested under custom smart lists
-                        const orphanBulletMatch = line.text.match(/^([ \t]*)([-*+])\s+(.*)$/);
-                        if (orphanBulletMatch) {
-                            const start = line.from + (orphanBulletMatch[1] || '').length;
-                            builder.add(start, start + (orphanBulletMatch[2] || '').length + 1, Decoration.mark({
-                                class: "cm-list-1 cm-formatting cm-formatting-list cm-formatting-list-ul"
+                                class: `cm-list-${visualDepth} cm-formatting cm-formatting-list cm-formatting-list-ol` 
                             }));
                         }
                     }
@@ -254,22 +235,23 @@ function autoFormatVisibleRanges(view: EditorView) {
         for (let i = startLine; i <= endLine; i++) {
             if (processedLines.has(i)) continue;
             
+            if (isLineInFencedCode(state, i)) { processedLines.add(i); continue; }
+            
             const line = state.doc.line(i);
-            if (isPosInCodeBlock(state, line.from)) { processedLines.add(i); continue; }
             if (isConsecutionBreaker(line.text) || line.text.trim() === '') { processedLines.add(i); continue; }
             if (!PREFIX_REGEX.test(line.text)) { processedLines.add(i); continue; }
 
             let blockStart = i;
             while (blockStart > 1) {
                 const blockLine = state.doc.line(blockStart - 1);
-                if (isConsecutionBreaker(blockLine.text) || isPosInCodeBlock(state, blockLine.from)) break;
+                if (isConsecutionBreaker(blockLine.text) || isLineInFencedCode(state, blockStart - 1)) break;
                 blockStart--;
             }
 
             let blockEnd = i;
             while (blockEnd < state.doc.lines) {
                 const blockLine = state.doc.line(blockEnd + 1);
-                if (isConsecutionBreaker(blockLine.text) || isPosInCodeBlock(state, blockLine.from)) break;
+                if (isConsecutionBreaker(blockLine.text) || isLineInFencedCode(state, blockEnd + 1)) break;
                 blockEnd++;
             }
 
@@ -302,7 +284,16 @@ function autoFormatVisibleRanges(view: EditorView) {
                 }
 
                 const userTokens = parseTokens(userPrefix);
-                currentTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+                const expectedTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+
+                if (expectedTokens.length > 4) {
+                    changes.push({ from: blockLine.from, to: blockLine.to, insert: `${indentStr}- ${content}` });
+                    hasRewrites = true;
+                    currentTokens =[]; currentIndent = -1;
+                    continue;
+                }
+
+                currentTokens = expectedTokens;
                 currentIndent = indentLevel;
 
                 const newPrefix = buildPrefixString(currentTokens, userPrefix);
@@ -330,7 +321,7 @@ const smartSpacePlugin = Prec.highest(keymap.of([
             if (!selection.empty) return false;
             
             const line = state.doc.lineAt(selection.from);
-            if (isPosInCodeBlock(state, selection.from)) return false;
+            if (isLineInFencedCode(state, line.number)) return false;
 
             const textBeforeCursor = line.text.slice(0, selection.from - line.from);
             const match = textBeforeCursor.match(SPACE_REGEX);
@@ -382,6 +373,16 @@ const smartSpacePlugin = Prec.highest(keymap.of([
             let nextTokens = parseTokens(typedPrefix);
             let currentTokens = getNextTokens(nextTokens, prevTokens, prevIndentLevel, targetIndentLevel);
 
+            if (currentTokens.length > 4) {
+                const insertText = `${indentStr}- `;
+                view.dispatch({
+                    changes: { from: line.from, to: selection.from, insert: insertText },
+                    selection: { anchor: line.from + insertText.length },
+                    annotations: SmartListSync.of(true)
+                });
+                return true;
+            }
+
             const nextPrefix = buildPrefixString(currentTokens, typedPrefix);
             const insertText = `${indentStr}${marker}${nextPrefix} `;
 
@@ -406,10 +407,8 @@ const smartEnterPlugin = Prec.highest(keymap.of([
             
             const line = state.doc.lineAt(selection.from);
             
-            // Respect Code Blocks: Instantly drop to a clean new line, halting Obsidian's native numeral auto-indent
-            if (isPosInCodeBlock(state, selection.from)) {
-                const isNativeList = /^[ \t]*([-*+]|[0-9]+\.)\s/.test(line.text);
-                if (isNativeList || PREFIX_REGEX.test(line.text)) {
+            if (isLineInFencedCode(state, line.number)) {
+                if (PREFIX_REGEX.test(line.text) || /^[ \t]*([-*+]|[0-9]+\.)\s/.test(line.text)) {
                     const indentMatch = line.text.match(/^([ \t]*)/);
                     const baseIndent = (indentMatch && indentMatch[1]) || ''; 
                     view.dispatch({
@@ -444,6 +443,15 @@ const smartEnterPlugin = Prec.highest(keymap.of([
             const lastToken = tokens[tokens.length - 1];
             if (lastToken) lastToken.value++; 
             
+            if (tokens.length > 4) {
+                const insertText = `\n${indentStr}- `;
+                view.dispatch({
+                    changes: { from: selection.from, to: selection.from, insert: insertText },
+                    selection: { anchor: selection.from + insertText.length }
+                });
+                return true;
+            }
+
             const nextPrefix = buildPrefixString(tokens, prefix);
             
             let nextMarker = marker.replace(/\[[xX]\]/, '[ ]');
@@ -476,7 +484,7 @@ const smartTabPlugin = Prec.highest(keymap.of([
 function handleIndent(view: EditorView, dir: 1 | -1): boolean {
     const state = view.state;
     const selection = state.selection.main;
-    if (isPosInCodeBlock(state, selection.from)) return false;
+    if (isLineInFencedCode(state, state.doc.lineAt(selection.from).number)) return false;
     
     const fromLine = state.doc.lineAt(selection.from);
     const toLine = state.doc.lineAt(selection.to);
@@ -578,7 +586,16 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
         }
 
         const userTokens = parseTokens(userPrefix);
-        currentTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+        const expectedTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+        
+        if (expectedTokens.length > 4) {
+            changes.push({ from: line.from, to: line.to, insert: `${indentStr}- ${content}` });
+            hasRewrites = true;
+            currentTokens =[]; currentIndent = -1;
+            continue;
+        }
+
+        currentTokens = expectedTokens;
         currentIndent = indentLevel;
 
         const newPrefix = buildPrefixString(currentTokens, userPrefix);
@@ -603,11 +620,10 @@ export default class SmartOrderListPlugin extends Plugin {
                 if (!text) { new Notice("Please select the list you want to format first."); return; }
                 
                 const lines = text.split('\n');
-                const result = [];
+                const result =[];
                 let currentTokens: Token[] =[];
                 let currentIndent = -1;
                 
-                // Static parsing requires manual state tracking for code blocks
                 let inCodeBlock = false;
 
                 for (const line of lines) {
@@ -629,13 +645,22 @@ export default class SmartOrderListPlugin extends Plugin {
                     const rewrite = rewritePrefix(indentStr, marker, userPrefix, content);
                     if (rewrite.changed) {
                         result.push(rewrite.newText);
-                        currentTokens = [];
+                        currentTokens =[];
                         currentIndent = -1;
                         continue;
                     }
 
                     const userTokens = parseTokens(userPrefix);
-                    currentTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+                    const expectedTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+                    
+                    if (expectedTokens.length > 4) {
+                        result.push(`${indentStr}- ${content}`);
+                        currentTokens =  [];
+                        currentIndent = -1;
+                        continue;
+                    }
+
+                    currentTokens = expectedTokens;
                     currentIndent = indentLevel;
 
                     const newPrefix = buildPrefixString(currentTokens, userPrefix);

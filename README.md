@@ -1,13 +1,12 @@
 ## Preview
-![README preview](assets/2026-0316_0312.png)
+![README preview](assets\2026-0317_0251.png)
 
----
----
 
 ### Insight 
 ---
 1. Parallel Principle 
-	1.1 The **parallel** lists align ==properties== with each other in **default** 
+	1.1 The **parallel** lists align ==internal consecution== with each other in **default** 
+	1.2 Maintain the numeric/alphabetic sequence *independently per indent level*, entirely ignoring any different styles (like bullets) sandwiched between them.
 2. Proactive behavior 
 	2.1 `Enter`: double #style 
 	2.2 Manual initial #style 
@@ -56,7 +55,7 @@
 - Consecutive List 
 	- [-] Auto refresh sequence
 		- Shuffle both **initial** and **manual** prefixes 
-			- [ ] Cooperate with **Prefix Rewrite Mechanism** 
+			- Cooperate with **Prefix Rewrite Mechanism** 
 		- Parallel style 
 		- Nested-parental prefix 
 	- **==Prefix Rewrite== Mechanism** 
@@ -65,7 +64,7 @@
 			- [-] Meanwhile, if inserting `Space` ahead of the existing prefix before the addition, the former one should be **saved** as ==normal text== without grey-background  which wouldn't trigger consecutive list neither anymore. 
 		- Exception 
 			- **Checkbox list** could live with all inline **Ordered lists** (not the **Bullet list**) 
-				- [ ] #issue check [[README#debug for mixture of Checkbox and Ordered lists]]
+				- #issue check [[README#debug for mixture of Checkbox and Ordered lists]]
 	- **==Exit== Mechanism** triggers 
 		- Parallel **Codeblock "\`\`\`", "\~\~\~"**
 			- [-] Cut off Consecution (external) 
@@ -165,19 +164,19 @@
 - [ ] 一、 
 
 ---
-#### #issue Bullet list style error nested after other list styles 
-##### instance
-- 1
-	- 2
-		- 3
-			1. 4
-				1.1 5
-					1.1.1 6
-						1.1.1.1 7
-						- 8
-					- 9
-				- 10
-			- 11
-		- 12
-	- 13
-- 14
+# known issues 
+#### issue_1 Bullet list strips dot behind 4 spaces 
+---
+1. 1
+	1.1 2
+		1.1.1 3
+			1.1.1.1 4
+			- 5
+		- 6
+	- 7
+- 8
+> Like line "5" and "6" above.
+##### unsolved reason 
+- Markdown's strictest rule: **Any text indented by 4 spaces (1 Tab) that isn't attached to a native list is an Indented Code Block.**
+- Because Obsidian doesn't recognize 1.1.1. as a list marker, the chain is broken. 
+- Kept for not modifying forcedly 
