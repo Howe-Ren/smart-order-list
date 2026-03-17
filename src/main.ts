@@ -8,11 +8,13 @@ import { SyntaxNode } from '@lezer/common';
 
 const MIX_COMP = "(?:[0-9]+|[a-zA-Z])";
 const SINGLE_ITEM = `(?:${MIX_COMP}\\.)`;
-const MULTI_ITEM = `(?:${MIX_COMP}(?:\\.${MIX_COMP}){1,3}\\.?)`;
+// FIX 2: Removed trailing \.? to strictly forbid multi-digits ending in a dot (e.g. 1.1. is forbidden)
+const MULTI_ITEM = `(?:${MIX_COMP}(?:\\.${MIX_COMP}){1,3})`;
 const MIXED_LIST = `(?:${MULTI_ITEM}|${SINGLE_ITEM})(?!\\.?(?:[0-9]+|[a-zA-Z]+))`;
 
 const LIST_PATTERN = `(${MIXED_LIST}|\\([0-9]+\\)|[一二三四五六七八九十]+、)`;
-const MARKER_REGEX = "([-*+]\\s+\\[[ xX]\\]\\s+|[-*+]\\s+)?";
+const MARKER_REGEX = "([-*+]\\s+\\[[ xX]\\]\\s+|[-*+]\\s+|[0-9]+\\.\\s+)?";
+
 const PREFIX_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}\\s+(.*)$`);
 const SPACE_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}$`);
 
@@ -45,6 +47,11 @@ type TokenType = 'number' | 'upper' | 'lower' | 'chinese' | 'paren';
 interface Token {
     type: TokenType;
     value: number;
+}
+
+interface StackItem {
+    tokens: Token[];
+    markerType: string;
 }
 
 const SmartListSync = Annotation.define<boolean>();
@@ -81,7 +88,9 @@ function buildPrefixString(tokens: Token[], originalPrefix: string): string {
     const lastType = tokens[tokens.length - 1]?.type;
     if (lastType === 'chinese') return base + '、';
     if (lastType === 'paren') return base; 
-    const forceDot = tokens.length === 1 || (originalPrefix.endsWith('.') && originalPrefix.split('.').length > 2);
+    
+    // FIX 2: Only append a trailing dot if there is exactly 1 digit/character.
+    const forceDot = tokens.length === 1;
     return base + (forceDot ? '.' : '');
 }
 
@@ -108,69 +117,117 @@ function isConsecutionBreaker(text: string): boolean {
     if (/^([ \t]*)(```|~~~)/.test(text)) return true; 
     if (/^([ \t]*)#+\s/.test(text)) return true; 
     if (/^([ \t]*)(---|___|\*\*\*)/.test(text)) return true; 
-    
-    const isUnordered = /^([ \t]*)([-*+])\s+/.test(text);
-    const isSmartList = PREFIX_REGEX.test(text);
-    if (isUnordered && !isSmartList) return true; 
-    
     return false; 
 }
 
 // --- PREFIX REWRITE MECHANISM ---
 function rewritePrefix(indent: string, marker: string, prefix: string, content: string): { changed: boolean, newText: string } {
     const isPureBullet = /^[-*+]\s+$/.test(marker);
+    const isNumeralMarker = /^[0-9]+\.\s+$/.test(marker);
+
+    // Bullet hotkey: Always overwrite to Bullet
     if (isPureBullet) {
         return { changed: true, newText: `${indent}${marker}${content}` };
     }
+    
+    // FIX 1-1: Numeral Hotkey toggle logic
+    if (isNumeralMarker) {
+        const tokens = parseTokens(prefix);
+        const lastType = tokens.length > 0 ? tokens[tokens.length - 1]?.type : null;
+        const isNumeralType = lastType === 'number' || lastType === 'paren';
+        
+        if (isNumeralType) {
+            // TOGGLE OFF: Numeral hotkey on an existing Numeral list strips both marker and prefix
+            return { changed: true, newText: `${indent}${content}` };
+        } else {
+            // OVERWRITE: Numeral hotkey on Alphabet/Chinese replaces the custom prefix
+            return { changed: true, newText: `${indent}${marker}${content}` };
+        }
+    }
+    
     return { changed: false, newText: "" };
 }
 
-function getNextTokens(userTokens: Token[], currentTokens: Token[], currentIndent: number, indentLevel: number): Token[] {
-    if (currentTokens.length === 0) {
-        return userTokens.map(t => ({ ...t, value: 1 }));
-    }
+// --- HIERARCHY STACK (Resolves 1-2 Parallel Principle) ---
+function buildTokenStack(state: EditorState, upToLine: number): (StackItem | null)[] {
+    let stack: (StackItem | null)[] =[];
+    let inCodeBlock = false;
 
-    if (indentLevel > currentIndent) {
-        let newType: Token['type'] = 'number';
-        if (userTokens.length > currentTokens.length) newType = userTokens[currentTokens.length]?.type || 'number';
-        else if (userTokens.length > 0) newType = userTokens[userTokens.length - 1]?.type || 'number';
-        return[...currentTokens, { type: newType, value: 1 }];
-    }
-
-    let expectedTokens = [...currentTokens];
-    if (indentLevel < currentIndent) {
-        const diff = currentIndent - indentLevel;
-        for (let i = 0; i < diff; i++) if (expectedTokens.length > 1) expectedTokens.pop();
-    }
-
-    const lastIdx = expectedTokens.length - 1;
-    if (lastIdx >= 0 && expectedTokens[lastIdx]) {
-        expectedTokens[lastIdx] = { ...expectedTokens[lastIdx]!, value: expectedTokens[lastIdx]!.value + 1 };
-    }
-
-    const currToken = userTokens[userTokens.length - 1];
-    const expectedToken = expectedTokens[expectedTokens.length - 1];
-    
-    const isConsistentStyle = (userTokens.length === expectedTokens.length) && (currToken?.type === expectedToken?.type);
-
-    const isNextSibling = userTokens.length === currentTokens.length &&
-        currentTokens.every((t, i) => {
-            const uToken = userTokens[i];
-            if (!uToken) return false;
-            if (i === currentTokens.length - 1) return t.type === uToken.type && t.value + 1 === uToken.value;
-            return t.type === uToken.type && t.value === uToken.value;
-        });
+    for (let i = 1; i < upToLine; i++) {
+        const text = state.doc.line(i).text;
         
-    const isChild = userTokens.length > currentTokens.length &&
-        currentTokens.every((t, i) => t.type === userTokens[i]?.type && t.value === userTokens[i]?.value) &&
-        userTokens.slice(currentTokens.length).every(t => t.value === 1 && t.type === 'number');
+        if (/^([ \t]*)(```|~~~)/.test(text)) { inCodeBlock = !inCodeBlock; continue; }
+        if (inCodeBlock) continue;
+        if (text.trim() === '') continue;
+        if (isConsecutionBreaker(text)) { stack = []; continue; }
 
-    const isArtifact = indentLevel <= currentIndent && (isNextSibling || isChild);
+        const isPureBullet = /^([ \t]*)([-*+])\s+/.test(text) && !PREFIX_REGEX.test(text);
+        if (isPureBullet) {
+            const lvl = getIndentLevel(text);
+            stack.splice(lvl); // Bullet list severs consecution for this indent level and deeper
+            continue;
+        }
 
-    return (isConsistentStyle || isArtifact) ? expectedTokens : [...userTokens];
+        const match = text.match(PREFIX_REGEX);
+        if (match) {
+            const lvl = getIndentLevel(text);
+            const marker = match[2] || '';
+            const prefix = match[3] || '';
+            const markerType = /^[-*+]\s+\[[ xX]\]\s+$/.test(marker) ? 'checkbox' : 'none';
+            stack[lvl] = { tokens: parseTokens(prefix), markerType };
+            stack.splice(lvl + 1);
+        }
+    }
+    return stack;
 }
 
-// --- LIVE PREVIEW DECORATOR (Cleaned & Optimized) ---
+function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], indentLevel: number, marker: string): Token[] {
+    const currentMarkerType = /^[-*+]\s+\[[ xX]\]\s+$/.test(marker) ? 'checkbox' : 'none';
+    const prevSameLevel = tokenStack[indentLevel];
+    let expectedTokens: Token[];
+
+    if (prevSameLevel && prevSameLevel.markerType === currentMarkerType && prevSameLevel.tokens.length > 0) {
+        expectedTokens = [...prevSameLevel.tokens];
+        const lastIdx = expectedTokens.length - 1;
+        const lastExpected = expectedTokens[lastIdx];
+        
+        if (lastExpected) {
+            expectedTokens[lastIdx] = { ...lastExpected, value: lastExpected.value + 1 };
+        }
+        
+        // Respect manual style overrides (e.g., user typed 'a.' where '2.' was expected)
+        const lastUser = userTokens[lastIdx];
+        const currentExpected = expectedTokens[lastIdx];
+        if (userTokens.length === expectedTokens.length && lastUser && currentExpected && lastUser.type !== currentExpected.type) {
+            currentExpected.type = lastUser.type;
+        }
+    } else {
+        // Look for valid parent
+        let parentItem: StackItem | null = null;
+        for (let i = indentLevel - 1; i >= 0; i--) {
+            const stackItem = tokenStack[i];
+            if (stackItem && stackItem.markerType === currentMarkerType && stackItem.tokens.length > 0) {
+                parentItem = stackItem;
+                break;
+            }
+        }
+
+        if (parentItem) {
+            let newType: Token['type'] = 'number';
+            if (userTokens.length > parentItem.tokens.length) newType = userTokens[parentItem.tokens.length]?.type || 'number';
+            else if (userTokens.length > 0) newType = userTokens[userTokens.length - 1]?.type || 'number';
+            expectedTokens =[...parentItem.tokens, { type: newType, value: 1 }];
+        } else {
+            // Brand new root list resets strictly to value 1
+            const firstType = userTokens[0]?.type || 'number';
+            expectedTokens =[{ type: firstType, value: 1 }];
+        }
+    }
+
+    return expectedTokens;
+}
+
+// --- LIVE PREVIEW DECORATOR ---
 const listMarkerDecorator = ViewPlugin.fromClass(class {
     decorations: DecorationSet;
     constructor(view: EditorView) { this.decorations = this.buildDecorations(view); }
@@ -239,24 +296,27 @@ function autoFormatVisibleRanges(view: EditorView) {
             
             const line = state.doc.line(i);
             if (isConsecutionBreaker(line.text) || line.text.trim() === '') { processedLines.add(i); continue; }
+            
+            const isPureBullet = /^([ \t]*)([-*+])\s+/.test(line.text) && !PREFIX_REGEX.test(line.text);
+            if (isPureBullet) { processedLines.add(i); continue; }
+
             if (!PREFIX_REGEX.test(line.text)) { processedLines.add(i); continue; }
 
             let blockStart = i;
             while (blockStart > 1) {
-                const blockLine = state.doc.line(blockStart - 1);
-                if (isConsecutionBreaker(blockLine.text) || isLineInFencedCode(state, blockStart - 1)) break;
+                const blockLineText = state.doc.line(blockStart - 1).text;
+                if (isConsecutionBreaker(blockLineText) || isLineInFencedCode(state, blockStart - 1)) break;
                 blockStart--;
             }
 
             let blockEnd = i;
             while (blockEnd < state.doc.lines) {
-                const blockLine = state.doc.line(blockEnd + 1);
-                if (isConsecutionBreaker(blockLine.text) || isLineInFencedCode(state, blockEnd + 1)) break;
+                const blockLineText = state.doc.line(blockEnd + 1).text;
+                if (isConsecutionBreaker(blockLineText) || isLineInFencedCode(state, blockEnd + 1)) break;
                 blockEnd++;
             }
 
-            let currentTokens: Token[] =[];
-            let currentIndent = -1;
+            let tokenStack = buildTokenStack(state, blockStart);
 
             for (let j = blockStart; j <= blockEnd; j++) {
                 processedLines.add(j);
@@ -264,7 +324,14 @@ function autoFormatVisibleRanges(view: EditorView) {
                 const text = blockLine.text;
 
                 if (text.trim() === '') continue;
-                if (isConsecutionBreaker(text)) { currentTokens =[]; currentIndent = -1; continue; }
+                if (isConsecutionBreaker(text)) { tokenStack =[]; continue; }
+
+                const pbMatch = text.match(/^([ \t]*)([-*+])\s+/);
+                if (pbMatch && !PREFIX_REGEX.test(text)) {
+                    const lvl = getIndentLevel(text);
+                    tokenStack.splice(lvl);
+                    continue;
+                }
 
                 const m = text.match(PREFIX_REGEX);
                 if (!m) continue;
@@ -279,24 +346,17 @@ function autoFormatVisibleRanges(view: EditorView) {
                 if (rewrite.changed) {
                     changes.push({ from: blockLine.from, to: blockLine.to, insert: rewrite.newText });
                     hasRewrites = true;
-                    currentTokens =[]; currentIndent = -1;
+                    tokenStack.splice(indentLevel);
                     continue; 
                 }
 
                 const userTokens = parseTokens(userPrefix);
-                const expectedTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
+                const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
 
-                if (expectedTokens.length > 4) {
-                    changes.push({ from: blockLine.from, to: blockLine.to, insert: `${indentStr}- ${content}` });
-                    hasRewrites = true;
-                    currentTokens =[]; currentIndent = -1;
-                    continue;
-                }
+                tokenStack[indentLevel] = { tokens: expectedTokens, markerType: /^[-*+]\s+\[[ xX]\]\s+$/.test(marker) ? 'checkbox' : 'none' };
+                tokenStack.splice(indentLevel + 1);
 
-                currentTokens = expectedTokens;
-                currentIndent = indentLevel;
-
-                const newPrefix = buildPrefixString(currentTokens, userPrefix);
+                const newPrefix = buildPrefixString(expectedTokens, userPrefix);
 
                 if (newPrefix !== userPrefix) {
                     const prefixStart = blockLine.from + indentStr.length + marker.length;
@@ -351,39 +411,11 @@ const smartSpacePlugin = Prec.highest(keymap.of([
             }
 
             const targetIndentLevel = getIndentLevel(indentStr);
-            let prevTokens: Token[] =[];
-            let prevIndentLevel = -1;
+            const tokenStack = buildTokenStack(state, line.number);
+            const userTokens = parseTokens(typedPrefix);
+            const expectedTokens = getNextTokens(userTokens, tokenStack, targetIndentLevel, marker);
 
-            for (let i = line.number - 1; i >= 1; i--) {
-                const prevLine = state.doc.line(i).text;
-                if (prevLine.trim() === '') continue;
-                if (isConsecutionBreaker(prevLine)) break;
-
-                const prevMatch = prevLine.match(PREFIX_REGEX);
-                if (prevMatch) {
-                    const prevIndent = getIndentLevel(prevMatch[1] || '');
-                    if (prevIndent <= targetIndentLevel) {
-                        prevTokens = parseTokens(prevMatch[3] || '');
-                        prevIndentLevel = prevIndent;
-                        break;
-                    }
-                }
-            }
-
-            let nextTokens = parseTokens(typedPrefix);
-            let currentTokens = getNextTokens(nextTokens, prevTokens, prevIndentLevel, targetIndentLevel);
-
-            if (currentTokens.length > 4) {
-                const insertText = `${indentStr}- `;
-                view.dispatch({
-                    changes: { from: line.from, to: selection.from, insert: insertText },
-                    selection: { anchor: line.from + insertText.length },
-                    annotations: SmartListSync.of(true)
-                });
-                return true;
-            }
-
-            const nextPrefix = buildPrefixString(currentTokens, typedPrefix);
+            const nextPrefix = buildPrefixString(expectedTokens, typedPrefix);
             const insertText = `${indentStr}${marker}${nextPrefix} `;
 
             view.dispatch({
@@ -443,15 +475,6 @@ const smartEnterPlugin = Prec.highest(keymap.of([
             const lastToken = tokens[tokens.length - 1];
             if (lastToken) lastToken.value++; 
             
-            if (tokens.length > 4) {
-                const insertText = `\n${indentStr}- `;
-                view.dispatch({
-                    changes: { from: selection.from, to: selection.from, insert: insertText },
-                    selection: { anchor: selection.from + insertText.length }
-                });
-                return true;
-            }
-
             const nextPrefix = buildPrefixString(tokens, prefix);
             
             let nextMarker = marker.replace(/\[[xX]\]/, '[ ]');
@@ -507,15 +530,13 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
         endLineNum++;
     }
 
-    let currentTokens: Token[] = [];
-    let currentIndent = -1;
     const changes: any[] =[];
     let hasRewrites = false;
+    let tokenStack = buildTokenStack(state, startLineNum);
 
     for (let i = startLineNum; i <= endLineNum; i++) {
         const line = state.doc.line(i);
         let text = line.text;
-        let convertedToUnordered = false;
         
         if (i >= fromLine.number && i <= toLine.number) {
             const match = text.match(/^([ \t]*)(.*)$/);
@@ -527,30 +548,7 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
                     else if (newIndent.endsWith('    ')) newIndent = newIndent.slice(0, -4);
                     else if (newIndent.length > 0) newIndent = newIndent.slice(0, Math.max(0, newIndent.length - 4));
                 }
-                
-                let newText = newIndent + (match[2] || '');
-
-                if (dir === -1) {
-                    const targetIndentLevel = getIndentLevel(newIndent);
-                    let prevListLine = '';
-                    for (let k = i - 1; k >= 1; k--) {
-                        const lineText = state.doc.line(k).text;
-                        if (lineText.trim() === '') continue;
-                        const level = getIndentLevel(lineText);
-                        if (level <= targetIndentLevel) { prevListLine = lineText; break; }
-                    }
-                    
-                    const isPureUnordered = /^([ \t]*)([-*+]\s+\[[ xX]\]|[-*+])\s+/.test(prevListLine) && !PREFIX_REGEX.test(prevListLine);
-                    if (isPureUnordered) {
-                        const marker = prevListLine.match(/^([ \t]*)([-*+]\s+\[[ xX]\]|[-*+])\s+/)?.[2];
-                        const currMatch = (match[2] || '').match(new RegExp(`^([-*+]\\s+\\[[ xX]\\]\\s+)?${LIST_PATTERN}\\s+(.*)$`));
-                        if (marker && currMatch) {
-                            newText = newIndent + marker + ' ' + (currMatch[3] || '');
-                            convertedToUnordered = true;
-                        }
-                    }
-                }
-                text = newText;
+                text = newIndent + (match[2] || '');
             }
         }
 
@@ -559,8 +557,16 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
             continue;
         }
 
-        if (isConsecutionBreaker(text) || convertedToUnordered) {
-            currentTokens =[]; currentIndent = -1;
+        if (isConsecutionBreaker(text)) {
+            tokenStack =[];
+            if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
+            continue;
+        }
+
+        const pbMatch = text.match(/^([ \t]*)([-*+])\s+/);
+        if (pbMatch && !PREFIX_REGEX.test(text)) {
+            const lvl = getIndentLevel(text);
+            tokenStack.splice(lvl);
             if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
             continue;
         }
@@ -581,24 +587,17 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
         if (rewrite.changed) {
             changes.push({ from: line.from, to: line.to, insert: rewrite.newText });
             hasRewrites = true;
-            currentTokens =[]; currentIndent = -1;
+            tokenStack.splice(indentLevel);
             continue; 
         }
 
         const userTokens = parseTokens(userPrefix);
-        const expectedTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
-        
-        if (expectedTokens.length > 4) {
-            changes.push({ from: line.from, to: line.to, insert: `${indentStr}- ${content}` });
-            hasRewrites = true;
-            currentTokens =[]; currentIndent = -1;
-            continue;
-        }
+        const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
 
-        currentTokens = expectedTokens;
-        currentIndent = indentLevel;
+        tokenStack[indentLevel] = { tokens: expectedTokens, markerType: /^[-*+]\s+\[[ xX]\]\s+$/.test(marker) ? 'checkbox' : 'none' };
+        tokenStack.splice(indentLevel + 1);
 
-        const newPrefix = buildPrefixString(currentTokens, userPrefix);
+        const newPrefix = buildPrefixString(expectedTokens, userPrefix);
         const newLineText = `${indentStr}${marker}${newPrefix} ${content}`;
         if (newLineText !== line.text) changes.push({ from: line.from, to: line.to, insert: newLineText });
     }
@@ -621,9 +620,7 @@ export default class SmartOrderListPlugin extends Plugin {
                 
                 const lines = text.split('\n');
                 const result =[];
-                let currentTokens: Token[] =[];
-                let currentIndent = -1;
-                
+                let tokenStack: (StackItem | null)[] =[];
                 let inCodeBlock = false;
 
                 for (const line of lines) {
@@ -631,7 +628,15 @@ export default class SmartOrderListPlugin extends Plugin {
                     if (inCodeBlock) { result.push(line); continue; }
 
                     if (line.trim() === '') { result.push(line); continue; }
-                    if (isConsecutionBreaker(line)) { currentTokens =[]; currentIndent = -1; result.push(line); continue; }
+                    if (isConsecutionBreaker(line)) { tokenStack =[]; result.push(line); continue; }
+                    
+                    const isPureBullet = /^([ \t]*)([-*+])\s+/.test(line) && !PREFIX_REGEX.test(line);
+                    if (isPureBullet) {
+                        const lvl = getIndentLevel(line);
+                        tokenStack.splice(lvl);
+                        result.push(line);
+                        continue;
+                    }
 
                     const match = line.match(PREFIX_REGEX);
                     if (!match) { result.push(line); continue; }
@@ -645,25 +650,17 @@ export default class SmartOrderListPlugin extends Plugin {
                     const rewrite = rewritePrefix(indentStr, marker, userPrefix, content);
                     if (rewrite.changed) {
                         result.push(rewrite.newText);
-                        currentTokens =[];
-                        currentIndent = -1;
+                        tokenStack.splice(indentLevel);
                         continue;
                     }
 
                     const userTokens = parseTokens(userPrefix);
-                    const expectedTokens = getNextTokens(userTokens, currentTokens, currentIndent, indentLevel);
-                    
-                    if (expectedTokens.length > 4) {
-                        result.push(`${indentStr}- ${content}`);
-                        currentTokens =  [];
-                        currentIndent = -1;
-                        continue;
-                    }
+                    const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
 
-                    currentTokens = expectedTokens;
-                    currentIndent = indentLevel;
+                    tokenStack[indentLevel] = { tokens: expectedTokens, markerType: /^[-*+]\s+\[[ xX]\]\s+$/.test(marker) ? 'checkbox' : 'none' };
+                    tokenStack.splice(indentLevel + 1);
 
-                    const newPrefix = buildPrefixString(currentTokens, userPrefix);
+                    const newPrefix = buildPrefixString(expectedTokens, userPrefix);
                     result.push(`${indentStr}${marker}${newPrefix} ${content}`);
                 }
                 editor.replaceSelection(result.join('\n'));
