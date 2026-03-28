@@ -1,0 +1,69 @@
+/* 1. Destroys false counters applied by Obsidian's native engine */
+.smart-list-prefix::before,
+.smart-list-prefix::after { 
+    content: none !important; 
+    display: none !important; 
+}
+
+/* 2. Clean Grey-Prefix styling matching native Obsidian lists */
+.smart-list-prefix {
+    color: var(--list-marker-color, var(--text-faint)) !important;
+}
+
+/* 3. Hologram Override for Consecution Exits (Live Preview) */
+.smart-list-override,
+.smart-list-override * {
+    color: transparent !important;
+    background: transparent !important;
+    position: relative;
+}
+.smart-list-override::after {
+    content: attr(data-expected) !important;
+    display: block !important;
+    
+    color: var(--list-marker-color, var(--text-faint)) !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    white-space: pre; /* Preserves the trailing space */
+    pointer-events: none; /* Allows mouse clicks to pass through */
+}
+
+/* 4. Reading Mode Variables */
+body {
+    /* Adjusts how wide the gap between the prefix and text is */
+    --sol-gap: 0.5em; 
+    /* Adjusts the stepping width of the whole list block */
+    --sol-indent: 2em; 
+}
+
+/* 5. Migrated from main.ts: Reading Mode Overrides */
+.smart-list-native-override-reading {
+    list-style-type: none !important;
+    position: relative;
+}
+
+.smart-list-override-reading,
+.smart-list-prefix-span-reading {
+    position: absolute;
+    right: 100%;
+    padding-right: var(--sol-gap, 0.5em);
+    top: 0;
+    text-align: right;
+    white-space: nowrap;
+    color: var(--list-marker-color, var(--text-faint)) !important;
+}
+
+.smart-list-item-reading {
+    display: block;
+    position: relative;
+    margin-top: 0;
+    margin-bottom: 0;
+    /* Dynamically calculated based on the --sol-level variable passed from JS */
+    margin-left: calc(var(--sol-indent, var(--list-indent, 2em)) * var(--sol-level, 0));
+}
+
+ul.smart-list-item-reading {
+    /* Unordered lists don't need 'block', they retain native display */
+    display: block; 
+}

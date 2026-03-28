@@ -1,10 +1,8 @@
-/* global window, document, console */
-
 import { Plugin, Editor, MarkdownView, Notice } from 'obsidian';
-import { Prec, RangeSetBuilder, Annotation, EditorState, ChangeSpec } from '@codemirror/state';
+import { Extension, Prec, RangeSetBuilder, Annotation, EditorState } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
-import type { SyntaxNode } from '@lezer/common';
-import { keymap, EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from '@codemirror/view';
+import { SyntaxNode } from '@lezer/common';
+import { keymap, EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate, WidgetType } from '@codemirror/view';
 
 // --- CORE REGEX PATTERNS ---
 const MIX_COMP = "(?:[1-9][0-9]*|[a-zA-Z])";
@@ -51,18 +49,6 @@ interface StackItem {
     tokens: Token[];
     markerType: string;
     isUnordered?: boolean;
-}
-
-interface ParsedLine {
-    isOrphan: boolean;
-    marker: string;
-    spaces: string;
-    depth: number;
-    text?: string;
-    expectedPrefix?: string;
-    prefix?: string;
-    isNativeOrdered?: boolean;
-    isNativeUnordered?: boolean;
 }
 
 const SmartListSync = Annotation.define<boolean>();
@@ -127,6 +113,7 @@ function isConsecutionBreaker(text: string): boolean {
     if (/^([ \t]*)(```|~~~)/.test(text)) return true;
     if (/^([ \t]*)#+\s/.test(text)) return true;
     if (/^([ \t]*)(---|___|\*\*\*)[ \t]*$/.test(text)) return true;
+    // Catch Obsidian Callouts accurately (case insensitive)
     if (/^([ \t]*)(>|&gt;)[ \t]*\[!/i.test(text)) return true; 
 
     return false;
@@ -166,7 +153,7 @@ function isRollbackNeeded(tokens: Token[]): boolean {
 
 // --- HIERARCHY STACK ---
 function buildTokenStack(state: EditorState, upToLine: number): (StackItem | null)[] {
-    const stack: (StackItem | null)[] =[];
+    let stack: (StackItem | null)[] =[];
     let inCodeBlock = false;
 
     for (let i = 1; i < upToLine; i++) {
@@ -174,14 +161,14 @@ function buildTokenStack(state: EditorState, upToLine: number): (StackItem | nul
 
         if (/^([ \t]*)(```|~~~)/.test(text)) {
             inCodeBlock = !inCodeBlock;
-            stack.length = 0; 
+            stack.length = 0; // Mutate instead of reassign
             continue;
         }
         if (inCodeBlock) continue;
         if (text.trim() === '') continue;
 
         if (isConsecutionBreaker(text)) {
-            stack.length = 0; 
+            stack.length = 0; // Mutate instead of reassign
             continue;
         }
 
@@ -219,7 +206,7 @@ function buildTokenStack(state: EditorState, upToLine: number): (StackItem | nul
 
                 if (isInconsistent) {
                     stack[lvl] = null;
-                    stack.splice(lvl + 1); 
+                    stack.splice(lvl + 1); // Only purge this branch and its children
                 }
             }
 
@@ -232,6 +219,7 @@ function buildTokenStack(state: EditorState, upToLine: number): (StackItem | nul
 
 // --- ERROR CORRECTION ENGINE ---
 function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], indentLevel: number, marker: string): Token[] {
+    const currentMarkerType = /^[-*+]\s+\[[ xX-]\]\s+$/.test(marker) ? 'checkbox' : 'none';
     const prevSameLevel = tokenStack[indentLevel];
     let expectedTokens: Token[];
 
@@ -264,10 +252,11 @@ function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], in
         const stackItem = tokenStack[i];
         if (stackItem) {
             parentItem = stackItem;
-            break;
+            break; // Stop at the very closest parent
         }
     }
 
+    // Ensure we only inherit digits if the parent is explicitly ORDERED
     if (parentItem && !parentItem.isUnordered && parentItem.tokens.length > 0) {
         let newType: Token['type'] = 'number';
         if (userTokens.length > parentItem.tokens.length) {
@@ -277,6 +266,7 @@ function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], in
         }
         expectedTokens =[...parentItem.tokens.map(t => ({ ...t })), { type: newType, value: 1 }];
     } else {
+        // If parent is unordered, or no parent exists, initialize gracefully
         const firstType = userTokens[0]?.type || 'number';
         expectedTokens = [{ type: firstType, value: 1 }];
     }
@@ -294,18 +284,21 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
         const builder = new RangeSetBuilder<Decoration>();
         const state = view.state;
 
-        for (const { from, to } of view.visibleRanges) {
-            const startLineNum = state.doc.lineAt(from).number;
-            const endLineNum = state.doc.lineAt(to).number;
+        for (let { from, to } of view.visibleRanges) {
+            let startLineNum = state.doc.lineAt(from).number;
+            let endLineNum = state.doc.lineAt(to).number;
 
+            // 1. Find the safe start of the block to build a reliable stack
             let blockStart = startLineNum;
             while (blockStart > 1) {
                 if (isConsecutionBreaker(state.doc.line(blockStart - 1).text)) break;
                 blockStart--;
             }
 
-            const tokenStack = buildTokenStack(state, blockStart);
+            // 2. Initialize the stack up to blockStart
+            let tokenStack = buildTokenStack(state, blockStart);
 
+            // 3. Process line by line through the visible range
             for (let i = blockStart; i <= endLineNum; i++) {
                 const line = state.doc.line(i);
                 const text = line.text;
@@ -320,12 +313,14 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                     continue;
                 }
 
+                // 1. MATCH PURE BULLETS (AND ORPHANS)
                 const pbMatch = text.match(/^([ \t]*)([-*+])(\s+)/);
                 if (pbMatch && !PREFIX_REGEX.test(text)) {
                     const lvl = getIndentLevel(text);
                     tokenStack[lvl] = { tokens:[], markerType: 'bullet', isUnordered: true };
                     tokenStack.splice(lvl + 1);
 
+                    // FIX: RESCUE ORPHANED AND NESTED BULLETS right here before we `continue`!
                     if (i >= startLineNum) {
                         const indent = pbMatch[1] || '';
                         const markerChar = pbMatch[2] || '';
@@ -355,9 +350,10 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                             }));
                         }
                     }
-                    continue; 
+                    continue; // Now it safely skips the rest of the loop after applying the rescue UI!
                 }
 
+                // 2. MATCH SMART ORDERED LISTS
                 const match = text.match(PREFIX_REGEX);
                 if (match) {
                     const indent = match[1] || '';
@@ -391,15 +387,18 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                     tokenStack[indentLevel] = { tokens: expectedTokens, markerType: currentMarkerType };
                     tokenStack.splice(indentLevel + 1);
 
+                    // --- DECORATION LOGIC ---
                     if (i >= startLineNum) {
                         const isNativeOrdered = /^[1-9][0-9]*\.$/.test(prefix) && marker === '';
 
+                        // VISUALLY OVERRIDE Obsidian's number using pure CSS holograms!
                         if (isNativeOrdered && expectedPrefix !== prefix) {
                             builder.add(start, start + prefix.length + spaces.length, Decoration.mark({
                                 class: `smart-list-prefix smart-list-override`,
                                 attributes: { "data-expected": expectedPrefix + spaces }
                             }));
                         } 
+                        // Normal styling logic
                         else if (!isNativeOrdered || depth > 3) {
                             builder.add(start, start + prefix.length + spaces.length, Decoration.mark({
                                 class: `cm-formatting cm-formatting-list cm-formatting-list-ol cm-list-${visualDepth}`
@@ -418,14 +417,13 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
 
 // --- AUTO-REFRESH ENGINE ---
 const autoRefreshPlugin = ViewPlugin.fromClass(class {
-    timeout: number | null = null;
+    timeout: NodeJS.Timeout | null = null;
     update(update: ViewUpdate) {
         if (update.docChanged && update.view.hasFocus) {
             if (update.transactions.some(tr => tr.annotation(SmartListSync))) return;
-            if (this.timeout) window.clearTimeout(this.timeout);
-            this.timeout = window.setTimeout(() => {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
-                if (!((update.view as any).isDestroyed)) autoFormatVisibleRanges(update.view);
+            if (this.timeout) clearTimeout(this.timeout);
+            this.timeout = setTimeout(() => {
+                if (!(update.view as any).isDestroyed) autoFormatVisibleRanges(update.view);
             }, 300);
         }
     }
@@ -433,11 +431,11 @@ const autoRefreshPlugin = ViewPlugin.fromClass(class {
 
 function autoFormatVisibleRanges(view: EditorView) {
     const state = view.state;
-    const changes: ChangeSpec[] =[];
+    const changes: any[] =[];
     const processedLines = new Set<number>();
     let hasRewrites = false;
 
-    for (const { from, to } of view.visibleRanges) {
+    for (let { from, to } of view.visibleRanges) {
         const startLine = state.doc.lineAt(from).number;
         const endLine = state.doc.lineAt(to).number;
 
@@ -487,9 +485,9 @@ function autoFormatVisibleRanges(view: EditorView) {
                 const text = blockLine.text;
 
                 if (text.trim() === '') continue;
-                if (isConsecutionBreaker(text)) { tokenStack.length = 0; continue; }
+                if (isConsecutionBreaker(text)) { tokenStack =[]; continue; }
 
-                if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) continue;
+                if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/.test(text)) continue;
 
                 const pbMatch = text.match(/^([ \t]*)([-*+])\s+/);
                 if (pbMatch && !PREFIX_REGEX.test(text)) {
@@ -530,7 +528,7 @@ function autoFormatVisibleRanges(view: EditorView) {
                                              (currentMarkerType !== prevSameLevel.markerType);
                     if (isDifferentStyle) {
                         tokenStack[indentLevel] = null;
-                        tokenStack.splice(indentLevel + 1);
+                        tokenStack.splice(indentLevel + 1); // Safely sever consecution
                     }
                 }
 
@@ -554,6 +552,10 @@ function autoFormatVisibleRanges(view: EditorView) {
                     const isNativeOrdered = /^[1-9][0-9]*\.$/.test(userPrefix) && marker === '';
                     const isExpectedNative = /^[1-9][0-9]*\.$/.test(newPrefix);
                     
+                    // FIX: If Obsidian is enforcing a standard number, and our expected prefix 
+                    // is also a standard number, DO NOT rewrite the underlying text! 
+                    // Let the Hologram visually override it. This ends the infinite 
+                    // transaction war with Obsidian and permanently stabilizes the cursor!
                     if (isNativeOrdered && isExpectedNative) {
                         // Silently skip textual rewrite
                     } else {
@@ -615,7 +617,7 @@ const smartSpacePlugin = Prec.highest(keymap.of([
             }
 
             const targetIndentLevel = getIndentLevel(indentStr);
-            const tokenStack = buildTokenStack(state, line.number);
+            let tokenStack = buildTokenStack(state, line.number);
             const userTokens = parseTokens(typedPrefix);
             const currentMarkerType = /^[-*+]\s+\[[ xX-]\]\s+$/.test(marker) ? 'checkbox' : 'none';
 
@@ -771,7 +773,7 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
         endLineNum++;
     }
 
-    const changes: ChangeSpec[] =[];
+    const changes: any[] =[];
     let hasRewrites = false;
     let tokenStack = buildTokenStack(state, startLineNum);
 
@@ -820,7 +822,7 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
         if (text.trim() === '') continue;
 
         if (isConsecutionBreaker(text) || convertedToUnordered) {
-            tokenStack.length = 0;
+            tokenStack =[];
             if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
             continue;
         }
@@ -910,263 +912,106 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
 }
 
 export default class SmartOrderListPlugin extends Plugin {
-    onload() {
-        console.debug('Loading Smart Order List Plugin');
+    async onload() {
+        console.log('Loading Smart Order List Plugin (Clean Native Styling)');
+        
+        const styleEl = document.createElement('style');
+        styleEl.id = 'smart-order-list-styles';
+        styleEl.textContent = `
+            /* Destroys false counters applied by Obsidian's native engine */
+            .smart-list-prefix::before,
+            .smart-list-prefix::after { 
+                content: none !important; 
+                display: none !important; 
+            }
+            
+            /* Clean Grey-Prefix styling matching native Obsidian lists */
+            .smart-list-prefix {
+                color: var(--list-marker-color, var(--text-faint)) !important;
+            }
+
+            /* --- NEW: Hologram Override for Consecution Exits --- */
+            .smart-list-override,
+            .smart-list-override * {
+                color: transparent !important;
+                background: transparent !important;
+                position: relative;
+            }
+            .smart-list-override::after {
+                /* FIX: Added !important to overpower the 'content: none' rule above */
+                content: attr(data-expected) !important;
+                display: block !important;
+                
+                color: var(--list-marker-color, var(--text-faint)) !important;
+                position: absolute;
+                left: 0;
+                top: 0;
+                white-space: pre; /* Preserves the trailing space */
+                pointer-events: none; /* Allows mouse clicks to pass through */
+            }
+        `;
+        document.head.appendChild(styleEl);
 
         this.registerEditorExtension([smartEnterPlugin, smartTabPlugin, smartSpacePlugin, autoRefreshPlugin, listMarkerDecorator]);
 
         // --- READING VIEW POST PROCESSOR ---
         this.registerMarkdownPostProcessor((element, context) => {
-            const sectionInfo = context.getSectionInfo(element);
-            if (!sectionInfo) return;
-
-            const rawLines = sectionInfo.text.split('\n');
-            const parsedLines: Record<number, ParsedLine> = {};
-            const tokenStack: (StackItem | null)[] =[];
-            let inCodeBlock = false;
-
-            for (let i = 0; i < rawLines.length; i++) {
-                const text = rawLines[i];
-                if (text === undefined) continue;
-
-                const absLine = i; 
-
-                if (/^([ \t]*)(```|~~~)/.test(text)) {
-                    inCodeBlock = !inCodeBlock;
-                    tokenStack.length = 0;
-                    continue;
-                }
-                if (inCodeBlock) continue;
-                if (text.trim() === '') continue;
-
-                if (isConsecutionBreaker(text)) {
-                    tokenStack.length = 0;
-                    continue;
-                }
-
-                if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) continue;
-
-                const pbMatch = text.match(/^([ \t]*)([-*+])(\s+)/);
-                if (pbMatch && !PREFIX_REGEX.test(text)) {
-                    const indentLevel = getIndentLevel(text);
-                    tokenStack[indentLevel] = { tokens:[], markerType: 'bullet', isUnordered: true };
-                    tokenStack.splice(indentLevel + 1);
-                    
-                    parsedLines[absLine] = {
-                        isOrphan: true,
-                        marker: pbMatch[2] || '',
-                        spaces: pbMatch[3] || '',
-                        depth: indentLevel + 1,
-                        text
-                    };
-                    continue;
-                }
-
-                const match = text.match(PREFIX_REGEX);
-                if (match) {
-                    const marker = match[2] || '';
-                    const prefix = match[3] || '';
-                    const spaces = match[4] || '';
-                    const indentLevel = getIndentLevel(text);
-                    const userTokens = parseTokens(prefix);
-                    const currentMarkerType = /^[-*+]\s+\[[ xX-]\]\s+$/.test(marker) ? 'checkbox' : 'none';
-
-                    const prevSameLevel = tokenStack[indentLevel];
-                    if (prevSameLevel) {
-                        const lastUser = userTokens[userTokens.length - 1];
-                        const prevLast = prevSameLevel.tokens[prevSameLevel.tokens.length - 1];
-                        const isDifferentStyle = (userTokens.length !== prevSameLevel.tokens.length) || 
-                                                 (lastUser?.type !== prevLast?.type) || 
-                                                 (currentMarkerType !== prevSameLevel.markerType);
-                        if (isDifferentStyle) {
-                            tokenStack[indentLevel] = null;
-                            tokenStack.splice(indentLevel + 1);
-                        }
+            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+            let node: Node | null;
+            const nodesToProcess: Text[] =[];
+            
+            while (node = walker.nextNode()) {
+                if (!node.parentElement) continue;
+                let prev = node.previousSibling;
+                let isStart = true;
+                while (prev) {
+                    if (prev.nodeType === Node.ELEMENT_NODE && (prev as Element).tagName === 'INPUT') {
+                        prev = prev.previousSibling;
+                        continue;
                     }
-
-                    const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
-                    const expectedPrefix = buildPrefixString(expectedTokens, prefix);
-
-                    tokenStack[indentLevel] = { tokens: expectedTokens, markerType: currentMarkerType };
-                    tokenStack.splice(indentLevel + 1);
-
-                    parsedLines[absLine] = {
-                        isOrphan: false,
-                        expectedPrefix,
-                        prefix, marker, spaces,
-                        isNativeOrdered: /^[1-9][0-9]*\.$/.test(prefix) && marker === '',
-                        isNativeUnordered: /^[-*+]\s+$/.test(marker) && !prefix,
-                        depth: indentLevel + 1
-                    };
-                }
-            }
-
-            const liElements = Array.from(element.querySelectorAll('li[data-line]'));
-            for (let i = 0; i < liElements.length; i++) {
-                const blockEl = liElements[i];
-                if (!blockEl) continue;
-
-                const startLineNum = parseInt(blockEl.getAttribute('data-line') || '-1');
-                const lineData = parsedLines[sectionInfo.lineStart + startLineNum];
-                
-                if (lineData && !lineData.isOrphan && lineData.isNativeOrdered && lineData.expectedPrefix !== lineData.prefix) {
-                    const htmlEl = blockEl as HTMLElement;
-                    
-                    htmlEl.classList.add('smart-list-native-override-reading'); // Replaces inline styles
-
-                    if (!htmlEl.querySelector('.smart-list-override-reading')) {
-                        const overrideSpan = document.createElement('span');
-                        overrideSpan.className = 'list-number smart-list-prefix smart-list-override-reading';
-                        overrideSpan.textContent = lineData.expectedPrefix || '';
-                        
-                        // Inline styles moved to CSS .smart-list-override-reading
-
-                        htmlEl.insertBefore(overrideSpan, htmlEl.firstChild);
-                    }
-                }
-            }
-
-            for (let absLine = sectionInfo.lineStart; absLine <= sectionInfo.lineEnd; absLine++) {
-                const lineData = parsedLines[absLine];
-                if (!lineData) continue;
-
-                const needsFlattenedFix = (!lineData.isOrphan && !lineData.isNativeOrdered && !lineData.isNativeUnordered) || lineData.isOrphan;
-                if (!needsFlattenedFix) continue;
-
-                const targetPrefix = lineData.isOrphan ? lineData.marker : (lineData.marker + (lineData.prefix || ''));
-                const escapedTarget = targetPrefix.trimStart().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(`(^|\\n)([ \\t]*)${escapedTarget}`);
-
-                const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
-                let textNode: Text | null = null;
-                let match: RegExpMatchArray | null = null;
-
-                while (true) {
-                    const n = walker.nextNode() as Text | null;
-                    if (!n) break;
-                    
-                    let parent = n.parentNode;
-                    let isCode = false;
-                    while (parent && parent !== element) {
-                        if (parent.nodeName === 'PRE' || parent.nodeName === 'CODE') { isCode = true; break; }
-                        parent = parent.parentNode;
-                    }
-                    if (isCode) continue;
-
-                    match = n.nodeValue?.match(regex) || null;
-                    if (match) {
-                        textNode = n;
+                    if (prev.textContent?.trim() !== '') {
+                        isStart = false;
                         break;
                     }
+                    prev = prev.previousSibling;
                 }
-
-                if (textNode && match) {
-                    const splitIndex = match.index! + (match[1] || '').length + (match[2] || '').length; 
-                    const afterPrefixNode = textNode.splitText(splitIndex);
-                    
-                    const replaceRegex = new RegExp(`^${escapedTarget}[ \\t]*`);
-                    afterPrefixNode.nodeValue = afterPrefixNode.nodeValue?.replace(replaceRegex, '') || '';
-                    afterPrefixNode.nodeValue = afterPrefixNode.nodeValue?.replace(/^\n/, '') || '';
-
-                    let isInsideLI = false;
-                    let p = afterPrefixNode.parentNode;
-                    while (p && (p as Element).nodeName !== 'DIV' && !(p as Element).classList?.contains('el-p') && !(p as Element).classList?.contains('el-ol') && !(p as Element).classList?.contains('el-ul')) {
-                        if (p.nodeName === 'LI') { isInsideLI = true; break; }
-                        p = p.parentNode;
-                    }
-                    
-                    const extraIndent = isInsideLI ? Math.max(0, lineData.depth - 1) : lineData.depth;
-
-                    let container: HTMLElement;
-                    let appendTarget: HTMLElement;
-
-                    if (lineData.isOrphan) {
-                        container = document.createElement('ul');
-                        container.className = 'has-list-bullet smart-list-item-reading';
-                        
-                        const ulIndent = Math.max(0, extraIndent - 1);
-                        // Pass dynamic variable to CSS instead of writing static styles
-                        container.style.setProperty('--sol-level', ulIndent.toString());
-
-                        const li = document.createElement('li');
-                        li.dir = 'auto';
-                        
-                        const bulletSpan = document.createElement('span');
-                        bulletSpan.className = 'list-bullet'; 
-                        
-                        li.appendChild(bulletSpan);
-                        container.appendChild(li);
-                        appendTarget = li; 
-                    } else {
-                        container = document.createElement('div');
-                        container.className = 'smart-list-item-reading';
-                        
-                        // Pass dynamic variable to CSS instead of writing static styles
-                        container.style.setProperty('--sol-level', extraIndent.toString());
-
-                        const prefixSpan = document.createElement('span');
-                        // Added 'smart-list-prefix-span-reading' to map to your new CSS
-                        prefixSpan.className = 'list-number smart-list-prefix smart-list-prefix-span-reading';
-                        prefixSpan.textContent = lineData.expectedPrefix || ''; 
-                        
-                        // Inline styles moved to CSS .smart-list-prefix-span-reading
-
-                        container.appendChild(prefixSpan);
-                        appendTarget = container;
-                    }
-
-                    const parent = afterPrefixNode.parentNode;
-                    if (parent) {
-                        parent.insertBefore(container, afterPrefixNode);
-                        
-                        let current: Node | null = afterPrefixNode;
-                        while (current) {
-                            const next: Node | null = current.nextSibling;
-                            
-                            if (current.nodeName === 'BR') {
-                                parent.removeChild(current);
-                                break; 
-                            }
-                            
-                            if (current.nodeType === Node.TEXT_NODE) {
-                                const newlineIndex = current.nodeValue?.indexOf('\n');
-                                if (newlineIndex !== undefined && newlineIndex !== -1) {
-                                    const nextLineNode = (current as Text).splitText(newlineIndex);
-                                    nextLineNode.nodeValue = nextLineNode.nodeValue?.replace(/^\n/, '') || '';
-                                    
-                                    appendTarget.appendChild(current);
-                                    parent.insertBefore(nextLineNode, container.nextSibling);
-                                    
-                                    let outsideCurrent: Node | null = next;
-                                    let insertPos: Node | null = nextLineNode.nextSibling;
-                                    while (outsideCurrent) {
-                                        const nextOutside: Node | null = outsideCurrent.nextSibling;
-                                        parent.insertBefore(outsideCurrent, insertPos);
-                                        outsideCurrent = nextOutside;
-                                    }
-                                    break; 
-                                }
-                            }
-                            
-                            appendTarget.appendChild(current);
-                            current = next;
-                        }
-
-                        let nextNode: Node | null = container.nextSibling;
-                        while (nextNode && nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent?.trim() === '') {
-                            nextNode = nextNode.nextSibling;
-                        }
-                        if (nextNode && nextNode.nodeName === 'BR') {
-                            nextNode.parentNode?.removeChild(nextNode);
-                        }
-                    }
-                }
+                if (isStart) nodesToProcess.push(node as Text);
             }
+
+            nodesToProcess.forEach(textNode => {
+                const text = textNode.textContent || '';
+                const match = text.match(new RegExp(`^([ \\t]*)${LIST_PATTERN}([ \\t]+)(.*)$`));
+                
+                if (match) {
+                    const leadingSpace = match[1] || '';
+                    const prefix = match[2] || '';
+                    const trailingSpace = match[3] || '';
+                    const rest = match[4] || '';
+
+                    // Construct native-matching structure for Reading Mode
+                    const outerSpan = document.createElement('span');
+                    outerSpan.className = 'cm-formatting cm-formatting-list cm-formatting-list-ol';
+                    
+                    const innerSpan = document.createElement('span');
+                    innerSpan.className = 'list-number smart-list-prefix';
+                    innerSpan.textContent = prefix + trailingSpace;
+
+                    outerSpan.appendChild(innerSpan);
+
+                    const parent = textNode.parentElement;
+                    if (parent) {
+                        if (leadingSpace) parent.insertBefore(document.createTextNode(leadingSpace), textNode);
+                        parent.insertBefore(outerSpan, textNode);
+                        if (rest) parent.insertBefore(document.createTextNode(rest), textNode);
+                        parent.removeChild(textNode);
+                    }
+                }
+            });
         });
 
         this.addCommand({
             id: 'format-smart-list',
-            name: 'Format smart list',
+            name: 'Format Smart List',
             editorCallback: (editor: Editor, view: MarkdownView) => {
                 const text = editor.getSelection();
                 if (!text) { new Notice("Please select the list you want to format first."); return; }
@@ -1253,5 +1098,10 @@ export default class SmartOrderListPlugin extends Plugin {
                 editor.replaceSelection(result.join('\n'));
             }
         });
+    }
+
+    onunload() {
+        const styleEl = document.getElementById('smart-order-list-styles');
+        if (styleEl) styleEl.remove();
     }
 }
