@@ -3,7 +3,7 @@
 	"name": "Smart Order List",
 	"version": "2.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Smartly stylize and manage Parallel and Nest Line. (Stylize Last-Digit Element with Unconsecutive-Value to self-consistent Element with consecutive value)",
+	"description": "Smartly stylize and manage Parallel and Nest Line.",
 	"author": "Howe",
 	"authorUrl": "https://github.com/Howe-Ren",
 	"fundingUrl": "",
