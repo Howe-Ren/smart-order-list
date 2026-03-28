@@ -4,6 +4,8 @@ import { defineConfig } from "eslint/config";
 import obsidianmd from "eslint-plugin-obsidianmd";
 
 export default defineConfig([
+  { ignores:["main.js", "version-bump.mjs"] }, // version-bump.mjs is Node script, not browser plugin code
+
   ...obsidianmd.configs.recommended,
   {
     files: ["**/*.ts"],
