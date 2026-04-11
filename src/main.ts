@@ -13,7 +13,7 @@ const MULTI_ITEM = `(?:${MIX_COMP}(?:\\.${MIX_COMP}){1,3}\\.?)`;
 const MIXED_LIST = `(?:${MULTI_ITEM}|${SINGLE_ITEM})(?!\\.?(?:[0-9]+|[a-zA-Z]+))`;
 
 const LIST_PATTERN = `(${MIXED_LIST}|\\([1-9][0-9]*\\)|[一二三四五六七八九十]+、)`;
-const MARKER_REGEX = "([-*+]\\s+\\[[ xX-]\\]\\s+|[-*+]\\s+|[1-9][0-9]*\\.\\s+)?";
+const MARKER_REGEX = "([-*+]\\s+\\[[ xX-]\\]\\s+)?";
 const PREFIX_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}([ \\t]+)(.*)$`);
 const SPACE_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}$`);
 
@@ -124,7 +124,7 @@ function isLineInFencedCode(state: EditorState, lineNum: number): boolean {
 
 function isConsecutionBreaker(text: string): boolean {
     if (text.trim() === '') return false;
-    if (/^([ \t]*)(```|~~~)/.test(text)) return true;
+    if (/^([ \t]*)(```|~~~)/.test(text)) return true; // RESTORED: Cuts off external consecution
     if (/^([ \t]*)#+\s/.test(text)) return true;
     if (/^([ \t]*)(---|___|\*\*\*)[ \t]*$/.test(text)) return true;
     if (/^([ \t]*)(>|&gt;)[ \t]*\[!/i.test(text)) return true; 
@@ -174,7 +174,7 @@ function buildTokenStack(state: EditorState, upToLine: number): (StackItem | nul
 
         if (/^([ \t]*)(```|~~~)/.test(text)) {
             inCodeBlock = !inCodeBlock;
-            stack.length = 0; 
+            stack.length = 0; // RESTORED: Purges memory to restart list at 1.
             continue;
         }
         if (inCodeBlock) continue;
@@ -306,9 +306,23 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
 
             const tokenStack = buildTokenStack(state, blockStart);
 
+            // NEW: Accurately track if we are starting inside a code block
+            let inCodeBlock = false;
+            for (let k = 1; k < blockStart; k++) {
+                if (/^([ \t]*)(```|~~~)/.test(state.doc.line(k).text)) inCodeBlock = !inCodeBlock;
+            }
+
             for (let i = blockStart; i <= endLineNum; i++) {
                 const line = state.doc.line(i);
                 const text = line.text;
+
+                // NEW: Toggles codeblock state and bans internal formatting!
+                if (/^([ \t]*)(```|~~~)/.test(text)) {
+                    inCodeBlock = !inCodeBlock;
+                    tokenStack.length = 0;
+                    continue;
+                }
+                if (inCodeBlock) continue;
 
                 if (text.trim() === '') continue;
                 if (isConsecutionBreaker(text)) {
@@ -551,15 +565,8 @@ function autoFormatVisibleRanges(view: EditorView) {
                 const finalText = indentStr + marker + newPrefix + spaces + content;
 
                 if (finalText !== text) {
-                    const isNativeOrdered = /^[1-9][0-9]*\.$/.test(userPrefix) && marker === '';
-                    const isExpectedNative = /^[1-9][0-9]*\.$/.test(newPrefix);
-                    
-                    if (isNativeOrdered && isExpectedNative) {
-                        // Silently skip textual rewrite
-                    } else {
-                        changes.push({ from: blockLine.from, to: blockLine.to, insert: finalText });
-                        hasRewrites = true;
-                    }
+                    changes.push({ from: blockLine.from, to: blockLine.to, insert: finalText });
+                    hasRewrites = true;
                 }
             }
         }
@@ -932,7 +939,6 @@ export default class SmartOrderListPlugin extends Plugin {
 
                 if (/^([ \t]*)(```|~~~)/.test(text)) {
                     inCodeBlock = !inCodeBlock;
-                    tokenStack.length = 0;
                     continue;
                 }
                 if (inCodeBlock) continue;
@@ -975,15 +981,46 @@ export default class SmartOrderListPlugin extends Plugin {
                 }
             }
 
-            // 1. UNIFY NATIVE ROOT MARKERS
+            // 1. UNIFY NATIVE ROOT MARKERS & INJECT ORGANIC CASCADE
             const liElements = Array.from(element.querySelectorAll('li[data-line]'));
             for (let i = 0; i < liElements.length; i++) {
                 const blockEl = liElements[i];
                 if (!blockEl) continue;
                 const startLineNum = parseInt(blockEl.getAttribute('data-line') || '-1');
-                const lineData = parsedLines[sectionInfo.lineStart + startLineNum];
+                const absLine = sectionInfo.lineStart + startLineNum;
+                const lineData = parsedLines[absLine];
                 
-                if (lineData && !lineData.isOrphan && lineData.isNativeOrdered) {
+                if (!lineData) continue;
+
+                // --- NEW: INJECT ORGANIC CASCADE INTO NATIVE LISTS ---
+                if (lineData.depth > 1) {
+                    let parentPrefixLen = 2; // Default for "1."
+                    for (let k = absLine - 1; k >= sectionInfo.lineStart; k--) {
+                        const pData = parsedLines[k];
+                        if (pData && pData.depth === lineData.depth - 1) {
+                            const pVis = pData.isOrphan ? pData.marker : (pData.marker + (pData.expectedPrefix || ''));
+                            const pClean = pVis.replace(/\s+$/, '');
+                            parentPrefixLen = 0;
+                            for (let c = 0; c < pClean.length; c++) {
+                                const char = pClean.charAt(c);
+                                if (/[0-9]/.test(char)) parentPrefixLen += 1;
+                                else if (char === '.') parentPrefixLen += 0.3;
+                                else if (char === ' ') parentPrefixLen += 0.5;
+                                else if (char === '-') parentPrefixLen += 0.6;
+                                else if (char.charCodeAt(0) > 255) parentPrefixLen += 2;
+                                else parentPrefixLen += 1;
+                            }
+                            break;
+                        }
+                    }
+                    const parentListEl = blockEl.parentElement;
+                    if (parentListEl && (parentListEl.tagName === 'UL' || parentListEl.tagName === 'OL')) {
+                        parentListEl.style.setProperty('--sol-parent-prefix-len', `${parentPrefixLen}ch`);
+                    }
+                }
+
+                // --- ORIGINAL: UNIFY NATIVE ROOT MARKERS ---
+                if (!lineData.isOrphan && lineData.isNativeOrdered) {
                     const htmlEl = blockEl as HTMLElement;
                     htmlEl.classList.add('smart-list-native-override-reading');
                     if (!htmlEl.querySelector('.smart-list-override-reading')) {
@@ -995,19 +1032,6 @@ export default class SmartOrderListPlugin extends Plugin {
                 }
             }
 
-            // HELPER: Safely create the folding SVG without innerHTML
-            const createCollapseIcon = () => {
-                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                svg.setAttribute('viewBox', '0 0 100 100');
-                svg.setAttribute('class', 'right-triangle');
-                svg.setAttribute('width', '8');
-                svg.setAttribute('height', '8');
-                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
-                svg.appendChild(path);
-                return svg;
-            };
-
             // 2. BUILD TRUE NESTED DOM TREES
             interface StackLevel { listEl: HTMLElement; itemEl: HTMLElement; }
             const listStack: (StackLevel | null)[] =[];
@@ -1018,7 +1042,8 @@ export default class SmartOrderListPlugin extends Plugin {
                 const needsFlattenedFix = (!lineData.isOrphan && !lineData.isNativeOrdered && !lineData.isNativeUnordered) || (lineData.isOrphan && lineData.depth > 1);
                 if (!needsFlattenedFix) continue;
 
-                const targetPrefix = lineData.isOrphan ? lineData.marker : (lineData.marker + (lineData.prefix || ''));
+                // This permanently solves the "- --list" bug without breaking the tree!
+                const targetPrefix = lineData.isOrphan ? (lineData.marker + lineData.spaces) : (lineData.marker + (lineData.prefix || ''));
                 const escapedTarget = targetPrefix.replace(/^\s+/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const regex = new RegExp(`(^|\\n)([ \\t]*)${escapedTarget}`);
 
