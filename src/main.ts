@@ -1,6 +1,6 @@
 /* global window, document, console */
 
-import { Plugin, Editor, MarkdownView, Notice } from 'obsidian';
+import { Plugin, Editor, MarkdownView, Notice, MarkdownFileInfo } from 'obsidian';
 import { Prec, RangeSetBuilder, Annotation, EditorState, ChangeSpec } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 import type { SyntaxNode } from '@lezer/common';
@@ -605,7 +605,7 @@ const smartSpacePlugin = Prec.highest(keymap.of([
 
             const rewrite = rewritePrefix(indentStr, marker, typedPrefix, "");
             if (rewrite.changed) {
-                const insertText = rewrite.newText.trimEnd() + " ";
+                const insertText = rewrite.newText.replace(/\s+$/, '') + " ";
                 view.dispatch({
                     changes: { from: line.from, to: selection.from, insert: insertText },
                     selection: { anchor: line.from + insertText.length },
@@ -928,7 +928,6 @@ export default class SmartOrderListPlugin extends Plugin {
             for (let i = 0; i < rawLines.length; i++) {
                 const text = rawLines[i];
                 if (text === undefined) continue;
-
                 const absLine = i; 
 
                 if (/^([ \t]*)(```|~~~)/.test(text)) {
@@ -938,12 +937,7 @@ export default class SmartOrderListPlugin extends Plugin {
                 }
                 if (inCodeBlock) continue;
                 if (text.trim() === '') continue;
-
-                if (isConsecutionBreaker(text)) {
-                    tokenStack.length = 0;
-                    continue;
-                }
-
+                if (isConsecutionBreaker(text)) { tokenStack.length = 0; continue; }
                 if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) continue;
 
                 const pbMatch = text.match(/^([ \t]*)([-*+])(\s+)/);
@@ -951,14 +945,7 @@ export default class SmartOrderListPlugin extends Plugin {
                     const indentLevel = getIndentLevel(text);
                     tokenStack[indentLevel] = { tokens:[], markerType: 'bullet', isUnordered: true };
                     tokenStack.splice(indentLevel + 1);
-                    
-                    parsedLines[absLine] = {
-                        isOrphan: true,
-                        marker: pbMatch[2] || '',
-                        spaces: pbMatch[3] || '',
-                        depth: indentLevel + 1,
-                        text
-                    };
+                    parsedLines[absLine] = { isOrphan: true, marker: pbMatch[2] || '', spaces: pbMatch[3] || '', depth: indentLevel + 1, text };
                     continue;
                 }
 
@@ -975,66 +962,64 @@ export default class SmartOrderListPlugin extends Plugin {
                     if (prevSameLevel) {
                         const lastUser = userTokens[userTokens.length - 1];
                         const prevLast = prevSameLevel.tokens[prevSameLevel.tokens.length - 1];
-                        const isDifferentStyle = (userTokens.length !== prevSameLevel.tokens.length) || 
-                                                 (lastUser?.type !== prevLast?.type) || 
-                                                 (currentMarkerType !== prevSameLevel.markerType);
-                        if (isDifferentStyle) {
-                            tokenStack[indentLevel] = null;
-                            tokenStack.splice(indentLevel + 1);
-                        }
+                        const isDifferentStyle = (userTokens.length !== prevSameLevel.tokens.length) || (lastUser?.type !== prevLast?.type) || (currentMarkerType !== prevSameLevel.markerType);
+                        if (isDifferentStyle) { tokenStack[indentLevel] = null; tokenStack.splice(indentLevel + 1); }
                     }
 
                     const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
                     const expectedPrefix = buildPrefixString(expectedTokens, prefix);
-
                     tokenStack[indentLevel] = { tokens: expectedTokens, markerType: currentMarkerType };
                     tokenStack.splice(indentLevel + 1);
 
-                    parsedLines[absLine] = {
-                        isOrphan: false,
-                        expectedPrefix,
-                        prefix, marker, spaces,
-                        isNativeOrdered: /^[1-9][0-9]*\.$/.test(prefix) && marker === '',
-                        isNativeUnordered: /^[-*+]\s+$/.test(marker) && !prefix,
-                        depth: indentLevel + 1
-                    };
+                    parsedLines[absLine] = { isOrphan: false, expectedPrefix, prefix, marker, spaces, isNativeOrdered: /^[1-9][0-9]*\.$/.test(prefix) && marker === '', isNativeUnordered: /^[-*+]\s+$/.test(marker) && !prefix, depth: indentLevel + 1 };
                 }
             }
 
+            // 1. UNIFY NATIVE ROOT MARKERS
             const liElements = Array.from(element.querySelectorAll('li[data-line]'));
             for (let i = 0; i < liElements.length; i++) {
                 const blockEl = liElements[i];
                 if (!blockEl) continue;
-
                 const startLineNum = parseInt(blockEl.getAttribute('data-line') || '-1');
                 const lineData = parsedLines[sectionInfo.lineStart + startLineNum];
                 
-                if (lineData && !lineData.isOrphan && lineData.isNativeOrdered && lineData.expectedPrefix !== lineData.prefix) {
+                if (lineData && !lineData.isOrphan && lineData.isNativeOrdered) {
                     const htmlEl = blockEl as HTMLElement;
-                    
-                    htmlEl.classList.add('smart-list-native-override-reading'); // Replaces inline styles
-
+                    htmlEl.classList.add('smart-list-native-override-reading');
                     if (!htmlEl.querySelector('.smart-list-override-reading')) {
                         const overrideSpan = document.createElement('span');
                         overrideSpan.className = 'list-number smart-list-prefix smart-list-override-reading';
                         overrideSpan.textContent = lineData.expectedPrefix || '';
-                        
-                        // Inline styles moved to CSS .smart-list-override-reading
-
                         htmlEl.insertBefore(overrideSpan, htmlEl.firstChild);
                     }
                 }
             }
 
+            // HELPER: Safely create the folding SVG without innerHTML
+            const createCollapseIcon = () => {
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('viewBox', '0 0 100 100');
+                svg.setAttribute('class', 'right-triangle');
+                svg.setAttribute('width', '8');
+                svg.setAttribute('height', '8');
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
+                svg.appendChild(path);
+                return svg;
+            };
+
+            // 2. BUILD TRUE NESTED DOM TREES
+            interface StackLevel { listEl: HTMLElement; itemEl: HTMLElement; }
+            const listStack: (StackLevel | null)[] =[];
+
             for (let absLine = sectionInfo.lineStart; absLine <= sectionInfo.lineEnd; absLine++) {
                 const lineData = parsedLines[absLine];
                 if (!lineData) continue;
-
-                const needsFlattenedFix = (!lineData.isOrphan && !lineData.isNativeOrdered && !lineData.isNativeUnordered) || lineData.isOrphan;
+                const needsFlattenedFix = (!lineData.isOrphan && !lineData.isNativeOrdered && !lineData.isNativeUnordered) || (lineData.isOrphan && lineData.depth > 1);
                 if (!needsFlattenedFix) continue;
 
                 const targetPrefix = lineData.isOrphan ? lineData.marker : (lineData.marker + (lineData.prefix || ''));
-                const escapedTarget = targetPrefix.trimStart().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const escapedTarget = targetPrefix.replace(/^\s+/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const regex = new RegExp(`(^|\\n)([ \\t]*)${escapedTarget}`);
 
                 const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
@@ -1044,7 +1029,6 @@ export default class SmartOrderListPlugin extends Plugin {
                 while (true) {
                     const n = walker.nextNode() as Text | null;
                     if (!n) break;
-                    
                     let parent = n.parentNode;
                     let isCode = false;
                     while (parent && parent !== element) {
@@ -1052,112 +1036,162 @@ export default class SmartOrderListPlugin extends Plugin {
                         parent = parent.parentNode;
                     }
                     if (isCode) continue;
-
                     match = n.nodeValue?.match(regex) || null;
-                    if (match) {
-                        textNode = n;
-                        break;
-                    }
+                    if (match) { textNode = n; break; }
                 }
 
                 if (textNode && match) {
                     const splitIndex = match.index! + (match[1] || '').length + (match[2] || '').length; 
                     const afterPrefixNode = textNode.splitText(splitIndex);
-                    
                     const replaceRegex = new RegExp(`^${escapedTarget}[ \\t]*`);
                     afterPrefixNode.nodeValue = afterPrefixNode.nodeValue?.replace(replaceRegex, '') || '';
                     afterPrefixNode.nodeValue = afterPrefixNode.nodeValue?.replace(/^\n/, '') || '';
 
-                    let isInsideLI = false;
-                    let p = afterPrefixNode.parentNode;
-                    while (p && (p as Element).nodeName !== 'DIV' && !(p as Element).classList?.contains('el-p') && !(p as Element).classList?.contains('el-ol') && !(p as Element).classList?.contains('el-ul')) {
-                        if (p.nodeName === 'LI') { isInsideLI = true; break; }
-                        p = p.parentNode;
-                    }
-                    
-                    const extraIndent = isInsideLI ? Math.max(0, lineData.depth - 1) : lineData.depth;
+                    const depth = lineData.depth;
+                    let listEl: HTMLElement | null = null;
+                    let itemEl = document.createElement('li');
+                    itemEl.dir = 'auto';
+                    itemEl.classList.add('smart-list-custom-reading');
 
-                    let container: HTMLElement;
-                    let appendTarget: HTMLElement;
+                    // ==========================================
+                    // NEW: LIVELY EXACT WIDTH CALCULATION!
+                    // ==========================================
+                    const visualPrefix = lineData.isOrphan ? lineData.marker : (lineData.marker + (lineData.expectedPrefix || ''));
+                    const cleanPrefix = visualPrefix.replace(/\s+$/, '');
+                    let exactChWidth = 0;
+                    for (let c = 0; c < cleanPrefix.length; c++) {
+                        const char = cleanPrefix.charAt(c); // TS FIX: charAt guarantees a string!
+                        if (/[0-9]/.test(char)) exactChWidth += 1;          // Digits are 1ch
+                        else if (char === '.') exactChWidth += 0.3;         // Dots are thin
+                        else if (char === ' ') exactChWidth += 0.5;         // Spaces
+                        else if (char === '-') exactChWidth += 0.6;         // Bullets
+                        else if (char.charCodeAt(0) > 255) exactChWidth += 2; // Chinese chars
+                        else exactChWidth += 1;
+                    }
+                    exactChWidth += 0.5; // Add the visual gap
+                    itemEl.style.setProperty('--sol-curr-prefix', `${exactChWidth}ch`);
+                    // ==========================================
 
                     if (lineData.isOrphan) {
-                        container = document.createElement('ul');
-                        container.className = 'has-list-bullet smart-list-item-reading';
-                        
-                        const ulIndent = Math.max(0, extraIndent - 1);
-                        // Pass dynamic variable to CSS instead of writing static styles
-                        container.style.setProperty('--sol-level', ulIndent.toString());
-
-                        const li = document.createElement('li');
-                        li.dir = 'auto';
-                        
                         const bulletSpan = document.createElement('span');
-                        bulletSpan.className = 'list-bullet'; 
-                        
-                        li.appendChild(bulletSpan);
-                        container.appendChild(li);
-                        appendTarget = li; 
+                        bulletSpan.className = 'list-bullet smart-list-bullet-reading';
+                        itemEl.appendChild(bulletSpan);
                     } else {
-                        container = document.createElement('div');
-                        container.className = 'smart-list-item-reading';
-                        
-                        // Pass dynamic variable to CSS instead of writing static styles
-                        container.style.setProperty('--sol-level', extraIndent.toString());
-
                         const prefixSpan = document.createElement('span');
-                        // Added 'smart-list-prefix-span-reading' to map to your new CSS
                         prefixSpan.className = 'list-number smart-list-prefix smart-list-prefix-span-reading';
-                        prefixSpan.textContent = lineData.expectedPrefix || ''; 
-                        
-                        // Inline styles moved to CSS .smart-list-prefix-span-reading
-
-                        container.appendChild(prefixSpan);
-                        appendTarget = container;
+                        prefixSpan.textContent = lineData.expectedPrefix || '';
+                        itemEl.appendChild(prefixSpan);
                     }
+
+                    const prevStack = listStack[depth];
+                    const parentStack = listStack[depth - 1];
+
+                    if (prevStack && prevStack.listEl) {
+                        listEl = prevStack.listEl;
+                        listEl.appendChild(itemEl);
+                    } else {
+                        listEl = document.createElement(lineData.isOrphan ? 'ul' : 'ol');
+                        listEl.className = lineData.isOrphan ? 'has-list-bullet el-ul' : 'el-ol';
+
+                        // ==========================================
+                        // RESTORED: THE LIVELY PARENT CALCULATION!
+                        // ==========================================
+                        let parentPrefixLen = 2; // Default fallback
+                        for (let k = absLine - 1; k >= sectionInfo.lineStart; k--) {
+                            const pData = parsedLines[k];
+                            if (pData && pData.depth === depth - 1) {
+                                const pVis = pData.isOrphan ? pData.marker : (pData.marker + (pData.expectedPrefix || ''));
+                                const pClean = pVis.replace(/\s+$/, '');
+                                parentPrefixLen = 0;
+                                for (let c = 0; c < pClean.length; c++) {
+                                    const char = pClean.charAt(c);
+                                    if (/[0-9]/.test(char)) parentPrefixLen += 1;
+                                    else if (char === '.') parentPrefixLen += 0.3;
+                                    else if (char === ' ') parentPrefixLen += 0.5;
+                                    else if (char === '-') parentPrefixLen += 0.6;
+                                    else if (char.charCodeAt(0) > 255) parentPrefixLen += 2;
+                                    else parentPrefixLen += 1;
+                                }
+                                break;
+                            }
+                        }
+                        // Injects the exact width of the parent directly into the ol!
+                        listEl.style.setProperty('--sol-parent-prefix-len', `${parentPrefixLen}ch`);
+                        // ==========================================
+
+                        listEl.appendChild(itemEl);
+
+                        if (parentStack && parentStack.itemEl) {
+                            parentStack.itemEl.appendChild(listEl);
+                            parentStack.itemEl.classList.add('has-list-children');
+                            if (!parentStack.itemEl.querySelector('.list-collapse-indicator')) {
+                                const collapseDiv = document.createElement('div');
+                                collapseDiv.className = 'list-collapse-indicator collapse-indicator collapse-icon';
+                                
+                                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                                svg.setAttribute('viewBox', '0 0 100 100');
+                                svg.setAttribute('class', 'right-triangle');
+                                svg.setAttribute('width', '8');
+                                svg.setAttribute('height', '8');
+                                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                                path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
+                                svg.appendChild(path);
+                                collapseDiv.appendChild(svg);
+                                
+                                parentStack.itemEl.insertBefore(collapseDiv, parentStack.itemEl.firstChild);
+                            }
+                        } else {
+                            const parent = afterPrefixNode.parentNode;
+                            if (parent) {
+                                parent.insertBefore(listEl, afterPrefixNode);
+                                let nativeLi: Node | null = afterPrefixNode.parentNode;
+                                while (nativeLi && nativeLi !== element && nativeLi.nodeName !== 'LI') {
+                                    nativeLi = nativeLi.parentNode;
+                                }
+                                if (nativeLi && nativeLi.nodeName === 'LI') {
+                                    const liEl = nativeLi as HTMLElement;
+                                    liEl.classList.add('has-list-children');
+                                    if (!liEl.querySelector('.list-collapse-indicator')) {
+                                        const collapseDiv = document.createElement('div');
+                                        collapseDiv.className = 'list-collapse-indicator collapse-indicator collapse-icon';
+                                        
+                                        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                                        svg.setAttribute('viewBox', '0 0 100 100');
+                                        svg.setAttribute('class', 'right-triangle');
+                                        svg.setAttribute('width', '8');
+                                        svg.setAttribute('height', '8');
+                                        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                                        path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
+                                        svg.appendChild(path);
+                                        collapseDiv.appendChild(svg);
+                                        
+                                        liEl.insertBefore(collapseDiv, liEl.firstChild);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    listStack[depth] = { listEl, itemEl };
+                    listStack.length = depth + 1;
 
                     const parent = afterPrefixNode.parentNode;
                     if (parent) {
-                        parent.insertBefore(container, afterPrefixNode);
-                        
                         let current: Node | null = afterPrefixNode;
                         while (current) {
                             const next: Node | null = current.nextSibling;
-                            
-                            if (current.nodeName === 'BR') {
-                                parent.removeChild(current);
-                                break; 
-                            }
-                            
+                            if (current.nodeName === 'BR') { parent.removeChild(current); break; }
                             if (current.nodeType === Node.TEXT_NODE) {
                                 const newlineIndex = current.nodeValue?.indexOf('\n');
                                 if (newlineIndex !== undefined && newlineIndex !== -1) {
                                     const nextLineNode = (current as Text).splitText(newlineIndex);
                                     nextLineNode.nodeValue = nextLineNode.nodeValue?.replace(/^\n/, '') || '';
-                                    
-                                    appendTarget.appendChild(current);
-                                    parent.insertBefore(nextLineNode, container.nextSibling);
-                                    
-                                    let outsideCurrent: Node | null = next;
-                                    let insertPos: Node | null = nextLineNode.nextSibling;
-                                    while (outsideCurrent) {
-                                        const nextOutside: Node | null = outsideCurrent.nextSibling;
-                                        parent.insertBefore(outsideCurrent, insertPos);
-                                        outsideCurrent = nextOutside;
-                                    }
+                                    itemEl.appendChild(current);
                                     break; 
                                 }
                             }
-                            
-                            appendTarget.appendChild(current);
+                            itemEl.appendChild(current);
                             current = next;
-                        }
-
-                        let nextNode: Node | null = container.nextSibling;
-                        while (nextNode && nextNode.nodeType === Node.TEXT_NODE && nextNode.textContent?.trim() === '') {
-                            nextNode = nextNode.nextSibling;
-                        }
-                        if (nextNode && nextNode.nodeName === 'BR') {
-                            nextNode.parentNode?.removeChild(nextNode);
                         }
                     }
                 }
@@ -1167,7 +1201,7 @@ export default class SmartOrderListPlugin extends Plugin {
         this.addCommand({
             id: 'format-smart-list',
             name: 'Format smart list',
-            editorCallback: (editor: Editor, view: MarkdownView) => {
+            editorCallback: (editor: Editor, ctx: MarkdownView | MarkdownFileInfo) => {
                 const text = editor.getSelection();
                 if (!text) { new Notice("Please select the list you want to format first."); return; }
 

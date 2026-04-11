@@ -1,3 +1,7 @@
+/* =========================================
+   SMART ORDER LIST - LIVE PREVIEW (EDITING)
+   ========================================= */
+
 /* 1. Destroys false counters applied by Obsidian's native engine */
 .smart-list-prefix::before,
 .smart-list-prefix::after { 
@@ -25,45 +29,122 @@
     position: absolute;
     left: 0;
     top: 0;
-    white-space: pre; /* Preserves the trailing space */
-    pointer-events: none; /* Allows mouse clicks to pass through */
+    white-space: pre; 
+    pointer-events: none; 
 }
 
-/* 4. Reading Mode Variables */
+/* =========================================
+   SMART ORDER LIST - READING MODE
+   ========================================= */
+
 body {
-    /* Adjusts how wide the gap between the prefix and text is */
-    --sol-gap: 0.5em; 
-    /* Adjusts the stepping width of the whole list block */
-    --sol-indent: 2em; 
+    --sol-gap: 0.5ch; 
 }
 
-/* 5. Migrated from main.ts: Reading Mode Overrides */
-.smart-list-native-override-reading {
+/* =========================================
+   1. STRIP NATIVE MARKERS 
+   ========================================= */
+/* ROOT LISTS (Line 1): Keep native 3ch margin! */
+.markdown-rendered li.smart-list-native-override-reading {
     list-style-type: none !important;
-    position: relative;
+    position: relative !important;
+    margin-inline-start: 3ch !important; 
 }
 
-.smart-list-override-reading,
-.smart-list-prefix-span-reading {
-    position: absolute;
-    right: 100%;
-    padding-right: var(--sol-gap, 0.5em);
-    top: 0;
-    text-align: right;
-    white-space: nowrap;
+/* NESTED LISTS (Line 2+): Crush the double-indent bug! */
+.markdown-rendered li.smart-list-custom-reading {
+    list-style-type: none !important;
+    position: relative !important;
+    margin-inline-start: 0 !important; 
+}
+
+/* =========================================
+   2. THE ORGANIC PADDING CASCADE (Smart Prefix Distance)
+   ========================================= */
+/* UNIFIED! Both Ordered (1.1) and Unordered (- 5) lists now use your dynamic distance math! */
+.markdown-rendered li > ol.el-ol,
+.markdown-rendered li > ul.el-ul {
+    /* The Perfect Distance: Parent's exact width + 2ch visual step! */
+    --sol-organic-step: calc(var(--sol-parent-prefix-len, 2ch) + 2ch);
+    
+    padding-inline-start: var(--sol-organic-step) !important;
+    margin-bottom: 0 !important;
+}
+
+/* =========================================
+   3. BASE SPAN STYLES
+   ========================================= */
+.markdown-rendered .smart-list-override-reading,
+.markdown-rendered .smart-list-prefix-span-reading,
+.markdown-rendered .smart-list-bullet-reading {
+    display: inline-block !important;
+    position: static !important;
+    width: auto !important;
+    min-width: 0 !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    font-size: inherit !important;
+    font-variant-numeric: tabular-nums !important;
     color: var(--list-marker-color, var(--text-faint)) !important;
+    white-space: nowrap !important;
+    box-sizing: border-box !important;
+    line-height: inherit !important;
 }
 
-.smart-list-item-reading {
-    display: block;
-    position: relative;
-    margin-top: 0;
-    margin-bottom: 0;
-    /* Dynamically calculated based on the --sol-level variable passed from JS */
-    margin-left: calc(var(--sol-indent, var(--list-indent, 2em)) * var(--sol-level, 0));
+/* =========================================
+   4. ROOT PREFIX (Line 1) -> Unified Line Math!
+   ========================================= */
+.markdown-rendered .smart-list-override-reading {
+    position: absolute !important;
+    
+    /* THE UNIFIED MATH: Anchors Line 1 to the exact same vertical line variable 
+       used by the rest of the lists. Perfect geometric parity! */
+    left: calc(var(--indentation-guide-reading-indent, -0.85em) - 0.5ch) !important;
+    
+    text-align: left !important;
+    padding-right: var(--sol-gap) !important;
 }
 
-ul.smart-list-item-reading {
-    /* Unordered lists don't need 'block', they retain native display */
-    display: block; 
+/* =========================================
+   5. NESTED PREFIXES (Lines 2, 3, 4)
+   ========================================= */
+.markdown-rendered .smart-list-prefix-span-reading {
+    /* Shares the exact same calculation as Line 1, 
+       guaranteeing the vertical line slices perfectly through the center of every "1"! */
+    margin-inline-start: calc(var(--indentation-guide-reading-indent, -0.85em) - 0.5ch) !important;
+    
+    text-align: left !important;
+    padding-right: var(--sol-gap) !important;
+}
+
+/* =========================================
+   6. NESTED BULLET DOT (Line 5)
+   ========================================= */
+.markdown-rendered .smart-list-bullet-reading {
+    /* Pulls left to the vertical line, then pulls 2.5px to center the 5px dot! */
+    margin-inline-start: calc(var(--indentation-guide-reading-indent, -0.85em) - 2.5px) !important;
+    
+    text-align: left !important;
+    padding-right: var(--sol-gap) !important;
+}
+
+.markdown-rendered .smart-list-bullet-reading::after {
+    content: "" !important;
+    display: inline-block !important;
+    width: 5px !important; 
+    height: 5px !important;
+    border-radius: 50% !important;
+    background-color: var(--list-marker-color, var(--text-normal)) !important;
+    
+    vertical-align: middle !important;
+    position: relative !important;
+    top: -1px !important; 
+    margin-inline-start: 2px !important;
+}
+
+/* Kills Obsidian's native pseudo-element margins */
+body .markdown-rendered ul > li > .list-bullet::after,
+body .markdown-rendered ol > li > .list-bullet::after {
+    margin: 0 !important;
 }
