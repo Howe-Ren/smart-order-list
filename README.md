@@ -1,10 +1,10 @@
 ## Preview
-![README preview](assets/2026-0327_0007.jpg)
+![README preview](assets/2026-0412_0043.png)
 
 
 # 1. Insight 
 ---
-1. Element's consecution is Parallel (cross nest-layer/vertical) and Nested (cross-nest/horizontal) from Upper-Level Line. Check [[README#2.3 Consecution Principle (interaction)]] 
+1. Element's consecution is Parallel (cross nest-layer/vertical) and Nested (cross-nest/horizontal) from Upper-Level Line. Check [[Smart Order List/README#2.3 Consecution Principle (interaction)]] 
 	1.1 **Parallel Principle** (same-layer nest): Parallel lists apply **self-consistent consecution** with each other in default 
 	1.2 **Nest Principle** (higher-grade layer, lower-grade layer) 
 2. Proactive behavior 
@@ -31,10 +31,10 @@
 | element_id | element_name   | description(&sample)                                                                    | primary_type | scondary_type | variation     | mix_prefix | max_digit | mix_list |
 | ---------- | -------------- | --------------------------------------------------------------------------------------- | ------------ | ------------- | ------------- | ---------- | --------- | -------- |
 | 1          | **Numeral.1**  | classic #hotkey , 0-9 <br>1. `1.` <br>2. `1.1`  <br>3. `1.1.1` <br>4. `1.1.1.1`         | ordered      | Numeral       | classic       | 1          | 4         | 1        |
-| 2          | **Numeral.2**  | parenthesized, 0-9<br>1. `(1)` <br>[[README#^8b482e\|Nested Prefix Rollback Mechanism]] | ordered      | Numeral       | parenthesized | 0          | 1         | 1        |
+| 2          | **Numeral.2**  | parenthesized, 0-9<br>1. `(1)` <br>[[Smart Order List/README#^8b482e\|Nested Prefix Rollback Mechanism]] | ordered      | Numeral       | parenthesized | 0          | 1         | 1        |
 | 3          | **Alphabet.1** | uppercase, A-Z<br>1. `A.` <br>2. `A.A` <br>3. `A.A.A` <br>4. `A.A.A.A`                  | ordered      | Alphabet      | uppercase     | 1          | 4         | 1        |
 | 4          | **Alphabet.2** | lowercase, a-z<br>1. `a.` <br>2. `a.a` <br>3. `a.a.a` <br>4. `a.a.a.a`                  | ordered      | Alphabet      | lowercase     | 1          | 4         | 1        |
-| 5          | **Chinese.1**  | classic<br>1. `一、` <br>[[README#^8b481e\|Nested Prefix Rollback Mechanism]]             | ordered      | Chinese       | classic       | 0          | 1         | 1        |
+| 5          | **Chinese.1**  | classic<br>1. `一、` <br>[[Smart Order List/README#^8b481e\|Nested Prefix Rollback Mechanism]]             | ordered      | Chinese       | classic       | 0          | 1         | 1        |
 | 6          | **Bullet**     | bullet  #hotkey <br>1. `-`                                                              | unordered    | Bullet        | classic       | 0          | 0         | 0        |
 | 7          | **Checkbox**   | checkbox #hotkey <br>1. `- [ ]` <br>2. `- [-]` <br>3. `- [x]`                           | unordered    | Checkbox      | classic       | 0          | 0         | 1        |
 ### 2.1.2 Addition  
@@ -42,6 +42,12 @@
 	- Grey-Text-Prefix and Indent-Prefix 
 	- Single-Digit: End with `.` 
 	- Multi-Digit: `.` should and only separate every two Elements 
+	- **Smart Prefix Distance** (Reading mode) 
+		- ##### Distance Logic 
+			- In 2-digit-prefix layer 
+				- 2ch 
+			- Latter layer 
+				- $Distance = ((num\_element * 1ch) + (num\_dot * 0.3ch)) + 2ch$
 - Ordered List 
 	- **Digit**, the smallest unit of an Ordered List's Prefix. $Digit = \{1,2,3,4\}$
 		- 1 Element in 1 Digit per Prefix 
@@ -73,7 +79,7 @@
 			2. `Numeral.1`-`Checkbox` #append #ordered (1)
 - **Digit** is exclusive to Ordered Element, thus Unordered List is Non-Digit 
 - **Ordered List** nests beneath Ordered List must be nested prefix, and the new nested digit is customizable (always in digit rule)
-- **Mixture's Prefix** consists of *Header* and *Tail* (Tail exclusive to Mixture), check [[README#2.4.2 Mix_List Permutation (Mixture)]]  
+- **Mixture's Prefix** consists of *Header* and *Tail* (Tail exclusive to Mixture), check [[Smart Order List/README#2.4.2 Mix_List Permutation (Mixture)]]  
 ### 2.2.2 Classification 
 ---
 > Better convenient view for various study scenarios 
@@ -152,7 +158,7 @@ $$\text{Multi-Element List} \subsetneq \text{Multi-Digit List}$$
 > **Rule: Shuffle Last-Digit Element and succeed Other-Digit from Consecutive Parent-Nest Line** 
 - [-] $Digit = \{\emptyset, 1, 2, 3, 4\}$ 
 	- Initialize Last-Digit Element with *initial value* 
-- Special Case: check [[README#2.3.2.1 Prefix Rollback Mechanism]] 
+- Special Case: check [[Smart Order List/README#2.3.2.1 Prefix Rollback Mechanism]] 
 	- Exceeded Digit 
 		- [-] $Digit > 4$ 
 		- [-] Exceeding-1-Digit `Numeral.2` 
@@ -175,14 +181,14 @@ $$\text{Multi-Element List} \subsetneq \text{Multi-Digit List}$$
 #### 2.3.2.2 Error Correction Mechanism  
 ---
 > Correct *Last-Digit Element* with *Unconsecutive-Value* to *self-consistent Element* with *consecutive value* 
-- **Rule**: When Lower-Level Line manually initializes the *Last-Digit Element* with *Unconsecutive-Value*, the Element should be corrected to *self-consistent Element* with *subsequent value* by [[README#2.3.2 Subsequent Prefix Rewrite Mechanism]], or *self-consistent Element* with *initial value* by [[README#2.3.1 Initial Shuffle Mechanism]] 
-	- "*self-consistent Element*" respects the intention of manual typing 
-	- "value correction" gives more room for faulut-tolerance 
+- **Rule**: When Lower-Level Line manually initializes the *Last-Digit Element* with *Unconsecutive-Value*, the Element should be corrected to *self-consistent Element* with *subsequent value* by [[Smart Order List/README#2.3.2 Subsequent Prefix Rewrite Mechanism]], or *self-consistent Element* with *initial value* by [[Smart Order List/README#2.3.1 Initial Shuffle Mechanism]] 
+	- "*self-consistent Element*" respects the intention of manual typing, but Prefix's priority is over Plain Content  
+	- "value correction" gives more room for fault-tolerance 
 - **Flow**: Error triggers Correction 
 	1. [-] Last-Digit Element is inconsistent with Upper-Line, and with Uninitial-Value 
-		- Initial Shuffle by [[README#2.3.1 Initial Shuffle Mechanism]] 
+		- Initial Shuffle by [[Smart Order List/README#2.3.1 Initial Shuffle Mechanism]] 
 	2. [-] Last-Digit Element is consistent with Upper-Line, but with Unsubsequent-Value 
-		- Subsequent Prefix Rewrite by [[README#2.3.2 Subsequent Prefix Rewrite Mechanism]] 
+		- Subsequent Prefix Rewrite by [[Smart Order List/README#2.3.2 Subsequent Prefix Rewrite Mechanism]] 
 ##### Instance 
 ###### step_0 
 1. 1
@@ -252,7 +258,7 @@ $$\text {Mix Principle} = \text {\{mix\_prefix (Ordered List), mix\_list (Mixtur
 | **Alphabet.2**            | 1         | 1          | 1          |
 ### 2.4.2 Mix_List Permutation (Mixture)
 > - **Rule:** Mixture = `Checkbox` × {Ordered List} 
-> - {Ordered List} follows [[README#2.4.1 Mix_Prefix Permutation (Ordered List)]] 
+> - {Ordered List} follows [[Smart Order List/README#2.4.1 Mix_Prefix Permutation (Ordered List)]] 
 
 | prefix: header/tail | Checkbox                 | Numeral.1          |
 | ------------------- | ------------------------ | ------------------ |
@@ -262,6 +268,7 @@ $$\text {Mix Principle} = \text {\{mix\_prefix (Ordered List), mix\_list (Mixtur
 | **Alphabet.1**      | Consecutive Tail         | -                  |
 | **Alphabet.2**      | Consecutive Tail         | -                  |
 | **Chinese.1**       | Consecutive Tail         | -                  |
+- As for the left Mix scenarios, content in `tail` should be treated as Normal Content instead of Prefix. I.e. neither *Prefix Rewrite Mechanism* nor *Mix_List* could effect. 
 
 # 3. Typography 
 
@@ -274,7 +281,7 @@ $$\text {Mix Principle} = \text {\{mix\_prefix (Ordered List), mix\_list (Mixtur
 | 5   | Chinese.1 #classic       |                   |
 ## 3.1 Inline Hotkey 
 > - Rule: 
-> 	- *Ordered-Prefix Hotkey* (Numeral.1) effects **Last-Digit Element**, and Cooperate with [[README#2.3.1 Initial Shuffle Mechanism]] and [[README#2.3.2 Subsequent Prefix Rewrite Mechanism]]  
+> 	- *Ordered-Prefix Hotkey* (Numeral.1) effects **Last-Digit Element**, and Cooperate with [[Smart Order List/README#2.3.1 Initial Shuffle Mechanism]] and [[Smart Order List/README#2.3.2 Subsequent Prefix Rewrite Mechanism]]  
 > 	- *Bullet Hotkey* effects the Line's complete Prefix 
 > 	- *Checkbox Hotkey* effects Prefix-Tail 
 
@@ -293,7 +300,7 @@ $$\text {Mix Principle} = \text {\{mix\_prefix (Ordered List), mix\_list (Mixtur
 | **Alphabet.1** | Initial-Value   | Initial-Value   | **Consecutive** | Initial-Value   | Initial-Value   |
 | **Alphabet.2** | Initial-Value   | Initial-Value   | Initial-Value   | **Consecutive** | Initial-Value   |
 | **Chinese.1**  | Initial-Value   | Initial-Value   | Initial-Value   | Initial-Value   | **Consecutive** |
-- More to check [[README#2.4.2 Mix_List Permutation (Mixture)]] 
+- More to check [[Smart Order List/README#2.4.2 Mix_List Permutation (Mixture)]] 
 
 ## 3.3 Child-Nest Ordered-Prefix 
 > Last-Digit Element 
@@ -307,7 +314,7 @@ $$\text {Mix Principle} = \text {\{mix\_prefix (Ordered List), mix\_list (Mixtur
 | **Alphabet.2**     | Succeed   | Overwrite | Succeed    | Succeed    | Overwrite |
 | Chinese.1          | -         | -         | -          | -          | -         |
 
-# Test Case 
+# 4. Test Case 
 > Should conduct all the Analogical Reasoning tests 
 ## 1. Consecution Principle > Initial Shuffle Mechanism 
 ### Case_1-1: $Digit = \{\emptyset, 1, 2, 3, 4\}$ #success 
@@ -384,9 +391,9 @@ $$\text {Mix Principle} = \text {\{mix\_prefix (Ordered List), mix\_list (Mixtur
 ## 2. Consecution Principle >  Subsequent Prefix Rewrite Mechanism 
 ### Case_2-1: Prefix Rollback Mechanism #success 
 > - Review case: 
-> 	- [[README#Case_1-2 Exceeded Digit > $Digit > 4$ success]] 
-> 	- [[README#Case_1-3 Exceeded Digit > Exceeding-1-Digit `Numeral.2` success]] 
-> 	- [[README#Case_1-4 Exceeded Digit > Exceeding-1-Digit `Chinese` success]] 
+> 	- [[Smart Order List/README#Case_1-2 Exceeded Digit > $Digit > 4$ success]] 
+> 	- [[Smart Order List/README#Case_1-3 Exceeded Digit > Exceeding-1-Digit `Numeral.2` success]] 
+> 	- [[Smart Order List/README#Case_1-4 Exceeded Digit > Exceeding-1-Digit `Chinese` success]] 
 ### Case_2-2: Error Correction Mechanism > Last-Digit Element is inconsistent with Upper-Line, and with Uninitial-Value #success 
 ---
 #### Instance 
