@@ -1,5 +1,3 @@
-/* global window, document, console */
-
 import { Plugin, Editor, MarkdownView, Notice, MarkdownFileInfo } from 'obsidian';
 import { Prec, RangeSetBuilder, Annotation, EditorState, ChangeSpec } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
@@ -430,7 +428,15 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
     }
 }, { decorations: v => v.decorations });
 
+
 // --- AUTO-REFRESH ENGINE ---
+
+// NEW: Define a type that includes the internal `isDestroyed` property.
+// This is a safe, accepted way to access internal CodeMirror properties without using `any`.
+interface EditorViewWithDestroyed extends EditorView {
+    isDestroyed: boolean;
+}
+
 const autoRefreshPlugin = ViewPlugin.fromClass(class {
     timeout: number | null = null;
     update(update: ViewUpdate) {
@@ -438,8 +444,9 @@ const autoRefreshPlugin = ViewPlugin.fromClass(class {
             if (update.transactions.some(tr => tr.annotation(SmartListSync))) return;
             if (this.timeout) window.clearTimeout(this.timeout);
             this.timeout = window.setTimeout(() => {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
-                if (!((update.view as any).isDestroyed)) autoFormatVisibleRanges(update.view);
+                if (!((update.view as EditorViewWithDestroyed).isDestroyed)) {
+                    autoFormatVisibleRanges(update.view);
+                }
             }, 300);
         }
     }
