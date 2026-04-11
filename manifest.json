@@ -1,7 +1,7 @@
 {
 	"id": "smart-order-list",
 	"name": "Smart Order List",
-	"version": "2.1.0",
+	"version": "2.1.1",
 	"minAppVersion": "0.15.0",
 	"description": "Smartly stylize and manage Parallel and Nest Lines (Lists).",
 	"author": "Howe",
