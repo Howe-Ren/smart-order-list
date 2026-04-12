@@ -1,15 +1,17 @@
 {
 	"compilerOptions": {
-		"baseUrl": "src",
 		"inlineSourceMap": true,
 		"inlineSources": true,
 		"module": "ESNext",
-		"target": "ES6",
+		"target": "ES2022",
 		"allowJs": true,
 		"noImplicitAny": true,
 		"noImplicitThis": true,
 		"noImplicitReturns": true,
-		"moduleResolution": "node",
+		
+		/* FIX: Uses modern bundler logic for esbuild instead of deprecated node10 */
+		"moduleResolution": "bundler",
+		
 		"importHelpers": true,
 		"noUncheckedIndexedAccess": true,
 		"isolatedModules": true,
@@ -17,14 +19,14 @@
 		"strictBindCallApply": true,
 		"allowSyntheticDefaultImports": true,
 		"useUnknownInCatchVariables": true,
-		"lib": [
+		
+		/* FIX: Modernized libraries so you can use modern string/array methods safely */
+		"lib":[
 			"DOM",
-			"ES5",
-			"ES6",
-			"ES7"
+			"ES2022"
 		]
 	},
-	"include": [
+	"include":[
 		"src/**/*.ts"
 	]
 }
