@@ -1022,6 +1022,7 @@ export default class SmartOrderListPlugin extends Plugin {
                     }
                     const parentListEl = blockEl.parentElement;
                     if (parentListEl && (parentListEl.tagName === 'UL' || parentListEl.tagName === 'OL')) {
+                        parentListEl.classList.add('smart-list-reading');
                         parentListEl.style.setProperty('--sol-parent-prefix-len', `${parentPrefixLen}ch`);
                     }
                 }
@@ -1124,6 +1125,7 @@ export default class SmartOrderListPlugin extends Plugin {
                     } else {
                         listEl = document.createElement(lineData.isOrphan ? 'ul' : 'ol');
                         listEl.className = lineData.isOrphan ? 'has-list-bullet el-ul' : 'el-ol';
+                        listEl.classList.add('smart-list-reading');
 
                         // ==========================================
                         // RESTORED: THE LIVELY PARENT CALCULATION!
