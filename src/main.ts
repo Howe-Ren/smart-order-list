@@ -1,19 +1,21 @@
 import { Plugin, Editor, MarkdownView, Notice, MarkdownFileInfo } from 'obsidian';
-import { Prec, RangeSetBuilder, Annotation, EditorState, ChangeSpec } from '@codemirror/state';
+import { Prec, Range, Annotation, EditorState, ChangeSpec } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 import type { SyntaxNode } from '@lezer/common';
 import { keymap, EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from '@codemirror/view';
-
-// --- CORE REGEX PATTERNS ---
-const MIX_COMP = "(?:[1-9][0-9]*|[a-zA-Z])";
-const SINGLE_ITEM = `(?:${MIX_COMP}\\.)`;
-const MULTI_ITEM = `(?:${MIX_COMP}(?:\\.${MIX_COMP}){1,3}\\.?)`;
-const MIXED_LIST = `(?:${MULTI_ITEM}|${SINGLE_ITEM})(?!\\.?(?:[0-9]+|[a-zA-Z]+))`;
-
-const LIST_PATTERN = `(${MIXED_LIST}|\\([1-9][0-9]*\\)|[一二三四五六七八九十]+、)`;
-const MARKER_REGEX = "([-*+]\\s+\\[[ xX-]\\]\\s+)?";
-const PREFIX_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}([ \\t]+)(.*)$`);
-const SPACE_REGEX = new RegExp(`^([ \\t]*)${MARKER_REGEX}${LIST_PATTERN}$`);
+import { parseQuoteLine, isCalloutHeader, isIndependentCallout, QuoteContextStacks, consumeFence, type FenceState } from './quote-context';
+import { decideCrossNest } from './cross-nest';
+import { createReadingCopyTracker } from './reading-copy';
+import { SmartTaskWidget } from './live-preview-task';
+import { LIST_PATTERN, PREFIX_REGEX, SPACE_REGEX } from './list-patterns';
+import { createHotkeyCleanup } from './hotkey-cleanup';
+import { liveCalloutPlugin } from './live-callout';
+import { liveHeaderAlignment } from './live-header-alignment';
+import { registerIndentationProfile } from './reading-indentation';
+import { applyReadingNestDistances, type ReadingAlignmentLine } from './reading-alignment';
+import { ReadingHeaderObserver } from './reading-header-observer';
+import { DEFAULT_SETTINGS, normalizeSettings, type SmartOrderListSettings } from './settings';
+import { SmartOrderListSettingTab } from './settings-tab';
 
 // --- CHINESE NUMERAL DICTIONARY ---
 const ZH_DIGITS =['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
@@ -22,19 +24,35 @@ function toChinese(num: number): string {
     if (num <= 10) return ZH_DIGITS[num] || '零';
     if (num < 20) return '十' + (num % 10 === 0 ? '' : (ZH_DIGITS[num % 10] || ''));
     if (num < 100) return (ZH_DIGITS[Math.floor(num / 10)] || '') + '十' + (num % 10 === 0 ? '' : (ZH_DIGITS[num % 10] || ''));
+    if (num === 100) return '一百';
     return num.toString();
 }
 
 function fromChinese(str: string): number {
-    if (ZH_DIGITS.includes(str)) return Math.max(0, ZH_DIGITS.indexOf(str));
-    if (str.startsWith('十')) return 10 + Math.max(0, ZH_DIGITS.indexOf(str[1] || '零'));
-    if (str.includes('十')) {
-        const parts = str.split('十');
-        const tens = Math.max(0, ZH_DIGITS.indexOf(parts[0] || '零'));
-        const ones = parts[1] ? Math.max(0, ZH_DIGITS.indexOf(parts[1] || '零')) : 0;
-        return tens * 10 + ones;
+    // Any numeral containing these units is outside the supported 1–100 range.
+    if (/[万亿]/.test(str)) return Number.POSITIVE_INFINITY;
+    let total = 0;
+    let digit: number | null = null;
+    let previousUnit = 10000;
+    for (const char of str) {
+        const index = ZH_DIGITS.indexOf(char);
+        if (index >= 0 && index < 10) {
+            if (index === 0) {
+                if (digit !== null) return Number.NaN;
+                continue;
+            }
+            if (digit !== null) return Number.NaN;
+            digit = index;
+            continue;
+        }
+        const unit = char === '十' ? 10 : char === '百' ? 100 : char === '千' ? 1000 : 0;
+        if (!unit || unit >= previousUnit) return Number.NaN;
+        if (digit === null && (unit !== 10 || total !== 0)) return Number.NaN;
+        total += (digit ?? 1) * unit;
+        digit = null;
+        previousUnit = unit;
     }
-    return 1;
+    return total + (digit ?? 0);
 }
 
 // --- CORE LOGIC: Parsing and Formatting Tokens ---
@@ -53,6 +71,7 @@ interface StackItem {
 
 interface ParsedLine {
     isOrphan: boolean;
+    fallbackToBullet?: boolean;
     marker: string;
     spaces: string;
     depth: number;
@@ -61,6 +80,8 @@ interface ParsedLine {
     prefix?: string;
     isNativeOrdered?: boolean;
     isNativeUnordered?: boolean;
+    taskTail?: string;
+    quoteScope: ListScope;
 }
 
 const SmartListSync = Annotation.define<boolean>();
@@ -78,6 +99,133 @@ function parseTokens(prefix: string): Token[] {
         if (/^[a-z]$/.test(t)) return { type: 'lower', value: t.charCodeAt(0) - 96 };
         return { type: 'number', value: 1 };
     });
+}
+
+function ensureReadingCollapseIndicator(item: HTMLElement): void {
+    item.classList.add('has-list-children');
+    if (item.querySelector('.list-collapse-indicator')) return;
+
+    const collapseDiv = document.createElement('div');
+    collapseDiv.className = 'list-collapse-indicator collapse-indicator collapse-icon';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.setAttribute('class', 'right-triangle');
+    svg.setAttribute('width', '8');
+    svg.setAttribute('height', '8');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
+    svg.appendChild(path);
+    collapseDiv.appendChild(svg);
+    item.insertBefore(collapseDiv, item.firstChild);
+}
+
+function getReadingParentLines(
+    parsedLines: Record<number, ParsedLine>,
+    startLine: number,
+    endLine: number
+): Map<number, number> {
+    const ancestorsByScope = new Map<ListScope, Map<number, number>>();
+    const parentByLine = new Map<number, number>();
+
+    for (let line = startLine; line <= endLine; line++) {
+        const lineData = parsedLines[line];
+        if (!lineData) continue;
+
+        let ancestors = ancestorsByScope.get(lineData.quoteScope);
+        if (!ancestors) {
+            ancestors = new Map<number, number>();
+            ancestorsByScope.set(lineData.quoteScope, ancestors);
+        }
+
+        if (lineData.depth === 1) {
+            ancestors.clear();
+            ancestors.set(1, line);
+            continue;
+        }
+
+        for (const depth of ancestors.keys()) {
+            if (depth >= lineData.depth) ancestors.delete(depth);
+        }
+        const parentLine = ancestors.get(lineData.depth - 1);
+        if (parentLine !== undefined) parentByLine.set(line, parentLine);
+        ancestors.set(lineData.depth, line);
+    }
+
+    return parentByLine;
+}
+
+/** Reconcile mixed native/generated rows to the parent implied by their source depth. */
+function repairReadingCustomHierarchy(
+    element: HTMLElement,
+    parsedLines: Record<number, ParsedLine>,
+    readingItems: Map<number, HTMLElement>,
+    nativeItems: Map<number, HTMLElement>,
+    parentByLine: Map<number, number>,
+    startLine: number,
+    endLine: number
+): void {
+    const lineByItem = new Map<HTMLElement, number>();
+    for (const [line, item] of nativeItems) lineByItem.set(item, line);
+    for (const [line, item] of readingItems) lineByItem.set(item, line);
+
+    for (let line = startLine; line <= endLine; line++) {
+        const lineData = parsedLines[line];
+        const item = readingItems.get(line) ?? nativeItems.get(line);
+        const parentLine = parentByLine.get(line);
+        if (!lineData || !item || parentLine === undefined) continue;
+
+        const parentItem = readingItems.get(parentLine) ?? nativeItems.get(parentLine);
+        if (!parentItem || parentItem === item || item.contains(parentItem)) continue;
+        if (!item.classList.contains('smart-list-custom-reading') &&
+            !parentItem.classList.contains('smart-list-custom-reading')) continue;
+
+        const nativeTaskHeader = item === nativeItems.get(line) && /^[-*+]\s+\[/.test(lineData.marker);
+        const listTag = lineData.isOrphan || lineData.fallbackToBullet || nativeTaskHeader ? 'UL' : 'OL';
+        const existingLists = Array.from(parentItem.children).filter((child): child is HTMLElement =>
+            child instanceof HTMLElement && child.tagName === listTag
+        );
+        let childList = existingLists.find(list => list.classList.contains('smart-list-reading-child')) ?? existingLists[0];
+        if (!childList) {
+            childList = document.createElement(listTag.toLowerCase());
+            if (listTag === 'UL') childList.classList.add('has-list-bullet', 'el-ul');
+            else childList.classList.add('el-ol');
+            parentItem.appendChild(childList);
+        }
+        childList.classList.add('smart-list-reading', 'smart-list-reading-child');
+
+        const oldList = item.parentElement;
+        if (oldList !== childList) {
+            childList.appendChild(item);
+            if (oldList instanceof HTMLElement &&
+                (oldList.tagName === 'OL' || oldList.tagName === 'UL') &&
+                oldList.classList.contains('smart-list-reading-child') &&
+                oldList.children.length === 0) {
+                const oldParent = oldList.parentElement;
+                oldList.remove();
+                if (oldParent instanceof HTMLElement && oldParent.tagName === 'LI' &&
+                    !Array.from(oldParent.children).some(child => child.tagName === 'OL' || child.tagName === 'UL')) {
+                    oldParent.classList.remove('has-list-children');
+                    oldParent.querySelector('.list-collapse-indicator')?.remove();
+                }
+            }
+        }
+
+        ensureReadingCollapseIndicator(parentItem);
+    }
+
+    const getLine = (item: HTMLElement): number => {
+        const mappedLine = lineByItem.get(item);
+        if (mappedLine !== undefined) return mappedLine;
+        const offset = Number(item.getAttribute('data-line'));
+        return Number.isFinite(offset) ? startLine + offset : Number.MAX_SAFE_INTEGER;
+    };
+    for (const list of Array.from(element.querySelectorAll<HTMLElement>('ol.smart-list-reading-child, ul.smart-list-reading-child'))) {
+        const items = Array.from(list.children).filter((child): child is HTMLElement =>
+            child instanceof HTMLElement && child.tagName === 'LI'
+        );
+        items.sort((a, b) => getLine(a) - getLine(b));
+        for (const item of items) list.appendChild(item);
+    }
 }
 
 function formatTokens(tokens: Token[]): string {
@@ -110,24 +258,72 @@ function getIndentLevel(line: string): number {
 }
 
 function isLineInFencedCode(state: EditorState, lineNum: number): boolean {
-    let inCode = false;
+    const scopes = createListScopes();
     for (let i = 1; i <= lineNum; i++) {
-        if (/^([ \t]*)(```|~~~)/.test(state.doc.line(i).text)) {
-            if (i === lineNum) return true;
-            inCode = !inCode;
-        }
+        const raw = state.doc.line(i).text;
+        const previous = i > 1 ? state.doc.line(i - 1).text : undefined;
+        const line = advanceListScope(scopes, raw, previous);
+        if (i === lineNum) return line.inCode;
     }
-    return inCode;
+    return false;
 }
 
-function isConsecutionBreaker(text: string): boolean {
+function isConsecutionBreaker(text: string, previousText?: string): boolean {
     if (text.trim() === '') return false;
     if (/^([ \t]*)(```|~~~)/.test(text)) return true; // RESTORED: Cuts off external consecution
     if (/^([ \t]*)#+\s/.test(text)) return true;
     if (/^([ \t]*)(---|___|\*\*\*)[ \t]*$/.test(text)) return true;
-    if (/^([ \t]*)(>|&gt;)[ \t]*\[!/i.test(text)) return true; 
+    if (isCalloutHeader(text)) return isIndependentCallout(text, previousText);
 
     return false;
+}
+
+interface ListScope {
+    stack: (StackItem | null)[];
+    fence: FenceState | null;
+    crossedDependentCallout: boolean;
+    isCallout: boolean;
+}
+
+function createListScopes(): QuoteContextStacks<ListScope> {
+    return new QuoteContextStacks(() => ({ stack: [], fence: null, crossedDependentCallout: false, isCallout: false }));
+}
+
+function advanceListScope(scopes: QuoteContextStacks<ListScope>, raw: string, previous?: string) {
+    const quote = parseQuoteLine(raw);
+    // A fence in an enclosing context treats apparent deeper quote markers as code.
+    for (let depth = 0; depth < quote.depth; depth++) {
+        const enclosing = scopes.peek(depth);
+        if (enclosing?.fence) return { ...quote, scope: enclosing, skip: true, inCode: true };
+    }
+    let scope = scopes.select(quote.depth);
+    if (!scope.fence && isCalloutHeader(raw)) {
+        if (quote.depth === 1) {
+            const independent = isIndependentCallout(raw, previous);
+            const outer = scopes.peek(0)!;
+            if (independent) {
+                outer.stack.length = 0;
+                outer.crossedDependentCallout = false;
+            } else {
+                outer.crossedDependentCallout = true;
+            }
+        }
+        scope = scopes.reset(quote.depth);
+        scope.isCallout = true;
+        return { ...quote, scope, skip: true, inCode: false };
+    }
+    const fence = consumeFence(quote.content, scope.fence);
+    if (fence.inCode) {
+        if (!scope.fence && fence.fence) scope.stack.length = 0;
+        scope.fence = fence.fence;
+        return { ...quote, scope, skip: true, inCode: true };
+    }
+    if (isConsecutionBreaker(quote.content, previous)) {
+        scope.stack.length = 0;
+        scope.crossedDependentCallout = false;
+        return { ...quote, scope, skip: true, inCode: false };
+    }
+    return { ...quote, scope, skip: quote.content.trim() === '', inCode: false };
 }
 
 // --- PREFIX REWRITE MECHANISM ---
@@ -154,38 +350,40 @@ function rewritePrefix(indent: string, marker: string, prefix: string, content: 
     return { changed: false, newText: "" };
 }
 
+function hasOutOfRangeElement(tokens: Token[]): boolean {
+    return tokens.some(token => {
+        if (!Number.isSafeInteger(token.value)) return true;
+        if (token.type === 'number') return token.value < 0;
+        if (token.type === 'paren') return token.value < 1;
+        if (token.type === 'upper' || token.type === 'lower') return token.value < 1 || token.value > 26;
+        return token.value < 1 || token.value > 100;
+    });
+}
+
+function hasMixedZero(tokens: Token[]): boolean {
+    return tokens.some(token => token.type === 'number' && token.value === 0) &&
+        tokens.some(token => token.type !== 'number');
+}
+
 function isRollbackNeeded(tokens: Token[]): boolean {
     if (tokens.length > 4) return true;
-    if (tokens.length > 1 && (tokens[0]?.type === 'paren' || tokens[0]?.type === 'chinese')) {
+    if (tokens.length > 1 && tokens.some(token => token.type === 'paren' || token.type === 'chinese')) {
         return true;
     }
-    return false;
+    return hasOutOfRangeElement(tokens) || hasMixedZero(tokens);
 }
 
 // --- HIERARCHY STACK ---
-function buildTokenStack(state: EditorState, upToLine: number): (StackItem | null)[] {
-    const stack: (StackItem | null)[] =[];
-    let inCodeBlock = false;
+function buildTokenScopes(state: EditorState, upToLine: number): QuoteContextStacks<ListScope> {
+    const scopes = createListScopes();
 
     for (let i = 1; i < upToLine; i++) {
-        const text = state.doc.line(i).text;
-
-        if (/^([ \t]*)(```|~~~)/.test(text)) {
-            inCodeBlock = !inCodeBlock;
-            stack.length = 0; // RESTORED: Purges memory to restart list at 1.
-            continue;
-        }
-        if (inCodeBlock) continue;
-        if (text.trim() === '') continue;
-
-        if (isConsecutionBreaker(text)) {
-            stack.length = 0; 
-            continue;
-        }
-
-        if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) {
-            continue;
-        }
+        const raw = state.doc.line(i).text;
+        const previous = i > 1 ? state.doc.line(i - 1).text : undefined;
+        const line = advanceListScope(scopes, raw, previous);
+        if (line.skip) continue;
+        const text = line.content;
+        const stack = line.scope.stack;
 
         const isPureBullet = /^([ \t]*)([-*+])\s+/.test(text) && !PREFIX_REGEX.test(text);
         const isSmartList = PREFIX_REGEX.test(text);
@@ -225,12 +423,21 @@ function buildTokenStack(state: EditorState, upToLine: number): (StackItem | nul
             stack.splice(lvl + 1);
         }
     }
-    return stack;
+    return scopes;
+}
+
+function buildTokenStack(state: EditorState, upToLine: number): (StackItem | null)[] {
+    const scopes = buildTokenScopes(state, upToLine);
+    const depth = parseQuoteLine(state.doc.line(upToLine).text).depth;
+    return scopes.select(depth).stack;
 }
 
 // --- ERROR CORRECTION ENGINE ---
-function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], indentLevel: number, marker: string): Token[] {
+function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], indentLevel: number, marker: string, nesting = false): Token[] {
     const prevSameLevel = tokenStack[indentLevel];
+    // A stored same-element zero represents the user's manual introduction.
+    const manualZero = !nesting && userTokens.length > 0 && userTokens.every(token => token.type === 'number') &&
+        userTokens[userTokens.length - 1]?.value === 0;
     let expectedTokens: Token[];
 
     if (prevSameLevel && prevSameLevel.tokens.length > 0) {
@@ -244,7 +451,7 @@ function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], in
         if (isDifferentStyle) {
             const resetTokens = userTokens.map(t => ({ ...t }));
             const lastReset = resetTokens[resetTokens.length - 1];
-            if (lastReset) lastReset.value = 1;
+            if (lastReset) lastReset.value = manualZero ? 0 : 1;
             return resetTokens;
         }
 
@@ -267,30 +474,62 @@ function getNextTokens(userTokens: Token[], tokenStack: (StackItem | null)[], in
     }
 
     if (parentItem && !parentItem.isUnordered && parentItem.tokens.length > 0) {
+        if (decideCrossNest(parentItem.tokens, userTokens, nesting) === 'overwrite') {
+            const requested = userTokens[userTokens.length - 1];
+            if (requested) return [{ ...requested, value: manualZero ? 0 : 1 }];
+        }
         let newType: Token['type'] = 'number';
         if (userTokens.length > parentItem.tokens.length) {
             newType = userTokens[parentItem.tokens.length]?.type || 'number';
         } else if (userTokens.length > 0) {
             newType = userTokens[userTokens.length - 1]?.type || 'number';
         }
-        expectedTokens =[...parentItem.tokens.map(t => ({ ...t })), { type: newType, value: 1 }];
+        const keepZero = manualZero && newType === 'number' && parentItem.tokens.every(token => token.type === 'number');
+        expectedTokens =[...parentItem.tokens.map(t => ({ ...t })), { type: newType, value: keepZero ? 0 : 1 }];
     } else {
         const firstType = userTokens[0]?.type || 'number';
-        expectedTokens = [{ type: firstType, value: 1 }];
+        expectedTokens = [{ type: firstType, value: manualZero && userTokens.length === 1 ? 0 : 1 }];
     }
 
     return expectedTokens;
 }
 
 // --- LIVE PREVIEW DECORATOR ---
+function selectionIntersectsTaskMarker(state: EditorState, marker: { from: number; to: number }): boolean {
+    return state.selection.ranges.some(range => {
+        if (range.from === range.to) {
+            // A caret on either boundary is outside the replaced marker characters.
+            return range.from > marker.from && range.from < marker.to;
+        }
+        return range.from < marker.to && range.to > marker.from;
+    });
+}
+
+// Match only the task marker and ordered prefix. The list body may contain
+// inline math or other syntax that should not affect checkbox recognition.
+const MULTI_SLOT_TASK_PREFIX_REGEX = /^([ \t]*)([-*+]\s+\[[ xX-]\]\s+)((?:[1-9][0-9]*|[a-zA-Z])(?:\.(?:[1-9][0-9]*|[a-zA-Z])){2,3})(?=[ \t]+)/;
+const NUMERAL_TASK_PREFIX_WITH_ZERO_REGEX = /^([ \t]*)([-*+]\s+\[[ xX-]\]\s+)((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2,3})(?=[ \t]+)/;
+
 const listMarkerDecorator = ViewPlugin.fromClass(class {
     decorations: DecorationSet;
+    private taskMarkers: { from: number; to: number }[] = [];
     constructor(view: EditorView) { this.decorations = this.buildDecorations(view); }
-    update(update: ViewUpdate) { if (update.docChanged || update.viewportChanged) this.decorations = this.buildDecorations(update.view); }
+    update(update: ViewUpdate) {
+        const markerSelectionChanged = update.selectionSet && this.taskMarkers.some(marker =>
+            selectionIntersectsTaskMarker(update.startState, marker) !== selectionIntersectsTaskMarker(update.state, marker));
+        if (update.docChanged || update.viewportChanged || update.focusChanged || markerSelectionChanged) {
+            this.decorations = this.buildDecorations(update.view);
+        }
+    }
 
     buildDecorations(view: EditorView) {
-        const builder = new RangeSetBuilder<Decoration>();
+        const decorations: Range<Decoration>[] = [];
         const state = view.state;
+        this.taskMarkers = [];
+        // Inline widgets (such as rendered math) can split visibleRanges in
+        // the middle of one logical line. Decoration work is line-based, so
+        // emit each line's decorations only once even if several ranges cover it.
+        const decoratedLines = new Set<number>();
 
         for (const { from, to } of view.visibleRanges) {
             const startLineNum = state.doc.lineAt(from).number;
@@ -298,38 +537,64 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
 
             let blockStart = startLineNum;
             while (blockStart > 1) {
-                if (isConsecutionBreaker(state.doc.line(blockStart - 1).text)) break;
+                const previous = blockStart > 2 ? state.doc.line(blockStart - 2).text : undefined;
+                if (isConsecutionBreaker(state.doc.line(blockStart - 1).text, previous)) break;
                 blockStart--;
             }
 
-            const tokenStack = buildTokenStack(state, blockStart);
-
-            // NEW: Accurately track if we are starting inside a code block
-            let inCodeBlock = false;
-            for (let k = 1; k < blockStart; k++) {
-                if (/^([ \t]*)(```|~~~)/.test(state.doc.line(k).text)) inCodeBlock = !inCodeBlock;
-            }
+            const scopes = buildTokenScopes(state, blockStart);
 
             for (let i = blockStart; i <= endLineNum; i++) {
                 const line = state.doc.line(i);
-                const text = line.text;
+                const previous = i > 1 ? state.doc.line(i - 1).text : undefined;
+                const scoped = advanceListScope(scopes, line.text, previous);
+                if (scoped.skip) continue;
+                const shouldDecorateLine = i >= startLineNum && !decoratedLines.has(i);
+                if (shouldDecorateLine) decoratedLines.add(i);
+                const text = scoped.content;
+                const tokenStack = scoped.scope.stack;
 
-                // NEW: Toggles codeblock state and bans internal formatting!
-                if (/^([ \t]*)(```|~~~)/.test(text)) {
-                    inCodeBlock = !inCodeBlock;
-                    tokenStack.length = 0;
-                    continue;
+                // Plain blockquotes do not render task markers following an ordered
+                // prefix. Callouts have their own renderer and are left untouched.
+                const inCallout = Array.from({ length: scoped.depth }, (_, depth) => scopes.peek(depth + 1))
+                    .some(scope => scope?.isCallout);
+                if (shouldDecorateLine && scoped.depth > 0 && !inCallout) {
+                    const ordered = text.match(PREFIX_REGEX);
+                    const task = ordered && !ordered[2] ? (ordered[5] || '').match(/^(\[[ xX-]\])(?=[ \t]|$)/) : null;
+                    if (ordered && task) {
+                        const markerFrom = line.from + scoped.quotePrefix.length + (ordered[1] || '').length +
+                            (ordered[3] || '').length + (ordered[4] || '').length;
+                        const markerText = task[1]!;
+                        const markerTo = markerFrom + markerText.length;
+                        const cursorInside = view.hasFocus && selectionIntersectsTaskMarker(state, { from: markerFrom, to: markerTo });
+                        this.taskMarkers.push({ from: markerFrom, to: markerTo });
+                        if (!cursorInside) {
+                            decorations.push(Decoration.replace({ widget: new SmartTaskWidget(markerFrom, markerText, 'tail') })
+                                .range(markerFrom, markerTo));
+                        }
+                    }
                 }
-                if (inCodeBlock) continue;
 
-                if (text.trim() === '') continue;
-                if (isConsecutionBreaker(text)) {
-                    tokenStack.length = 0;
-                    continue;
-                }
-
-                if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) {
-                    continue;
+                const taskHeaderMatch = text.match(/^([ \t]*)([-*+]\s+\[[ xX-]\])(?:[ \t]+|$)/);
+                const multiSlotTaskMatch = text.match(MULTI_SLOT_TASK_PREFIX_REGEX) ?? text.match(NUMERAL_TASK_PREFIX_WITH_ZERO_REGEX);
+                if (shouldDecorateLine && scoped.depth === 0 && taskHeaderMatch) {
+                    const indent = taskHeaderMatch[1] || '';
+                    const indentLevel = getIndentLevel(text);
+                    const ancestorItems = tokenStack.slice(0, indentLevel).reverse().filter((item): item is StackItem => item !== null);
+                    const twoSlotParent = ancestorItems.find(item => item.tokens.length === 2);
+                    const anyMultiSlotParent = ancestorItems.find(item => item.tokens.length > 1);
+                    const validOrderedChild = multiSlotTaskMatch && twoSlotParent && twoSlotParent.markerType !== 'checkbox';
+                    const legacyPlainTask = !PREFIX_REGEX.test(text) && anyMultiSlotParent && anyMultiSlotParent.markerType !== 'checkbox';
+                    if (validOrderedChild || legacyPlainTask) {
+                        const markerFrom = line.from + scoped.quotePrefix.length + indent.length;
+                        const markerText = taskHeaderMatch[2] || '';
+                        const markerTo = markerFrom + markerText.length;
+                        const cursorInside = view.hasFocus && selectionIntersectsTaskMarker(state, { from: markerFrom, to: markerTo });
+                        this.taskMarkers.push({ from: markerFrom, to: markerTo });
+                        if (!cursorInside) {
+                            decorations.push(Decoration.replace({ widget: new SmartTaskWidget(markerFrom, markerText) }).range(markerFrom, markerTo));
+                        }
+                    }
                 }
 
                 const pbMatch = text.match(/^([ \t]*)([-*+])(\s+)/);
@@ -338,11 +603,11 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                     tokenStack[lvl] = { tokens:[], markerType: 'bullet', isUnordered: true };
                     tokenStack.splice(lvl + 1);
 
-                    if (i >= startLineNum) {
+                    if (shouldDecorateLine) {
                         const indent = pbMatch[1] || '';
                         const markerChar = pbMatch[2] || '';
                         const spaces = pbMatch[3] || '';
-                        const start = line.from + indent.length;
+                        const start = line.from + scoped.quotePrefix.length + indent.length;
                         const depth = getIndentLevel(text) + 1;
                         const visualDepth = ((depth - 1) % 3) + 1;
 
@@ -360,11 +625,12 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                             n = n.parent;
                         }
 
-                        if (!hasNativeListMark) {
-                            builder.add(start, start + 1, Decoration.mark({ class: "list-bullet" }));
-                            builder.add(start, start + markerChar.length + spaces.length, Decoration.mark({
+                        const taskMarkerReplaced = taskHeaderMatch !== null && this.taskMarkers.some(marker => marker.from === start);
+                        if (!hasNativeListMark && !taskMarkerReplaced) {
+                            decorations.push(Decoration.mark({ class: "list-bullet" }).range(start, start + 1));
+                            decorations.push(Decoration.mark({
                                 class: `cm-formatting cm-formatting-list cm-formatting-list-ul cm-list-${visualDepth}`
-                            }));
+                            }).range(start, start + markerChar.length + spaces.length));
                         }
                     }
                     continue; 
@@ -376,7 +642,7 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                     const marker = match[2] || '';
                     const prefix = match[3] || '';
                     const spaces = match[4] || ''; 
-                    const start = line.from + indent.length + marker.length;
+                    const start = line.from + scoped.quotePrefix.length + indent.length + marker.length;
                     const depth = getIndentLevel(text) + 1;
                     const visualDepth = ((depth - 1) % 3) + 1;
                     const indentLevel = depth - 1;
@@ -398,33 +664,42 @@ const listMarkerDecorator = ViewPlugin.fromClass(class {
                     }
 
                     const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
-                    const expectedPrefix = buildPrefixString(expectedTokens, prefix);
+                    const fallbackToBullet = isRollbackNeeded(userTokens) || isRollbackNeeded(expectedTokens);
+                    const expectedPrefix = fallbackToBullet ? prefix : buildPrefixString(expectedTokens, prefix);
 
-                    tokenStack[indentLevel] = { tokens: expectedTokens, markerType: currentMarkerType };
+                    tokenStack[indentLevel] = fallbackToBullet
+                        ? { tokens: [], markerType: 'bullet', isUnordered: true }
+                        : { tokens: expectedTokens, markerType: currentMarkerType };
                     tokenStack.splice(indentLevel + 1);
 
-                    if (i >= startLineNum) {
-                        const isNativeOrdered = /^[1-9][0-9]*\.$/.test(prefix) && marker === '';
+                    if (shouldDecorateLine) {
+                        const isNativeOrdered = /^(?:0|[1-9][0-9]*)\.$/.test(prefix) && marker === '';
 
-                        if (isNativeOrdered && expectedPrefix !== prefix) {
-                            builder.add(start, start + prefix.length + spaces.length, Decoration.mark({
+                        if (isNativeOrdered && (expectedPrefix !== prefix || scoped.scope.crossedDependentCallout)) {
+                            decorations.push(Decoration.mark({
                                 class: `smart-list-prefix smart-list-override`,
                                 attributes: { "data-expected": expectedPrefix + spaces }
-                            }));
+                            }).range(start, start + prefix.length + spaces.length));
                         } 
                         else if (!isNativeOrdered || depth > 3) {
-                            builder.add(start, start + prefix.length + spaces.length, Decoration.mark({
+                            decorations.push(Decoration.mark({
                                 class: `cm-formatting cm-formatting-list cm-formatting-list-ol cm-list-${visualDepth}`
-                            }));
-                            builder.add(start, start + prefix.length, Decoration.mark({
-                                class: `list-number smart-list-prefix`
-                            }));
+                            }).range(start, start + prefix.length + spaces.length));
+                            decorations.push(Decoration.mark({
+                                class: `list-number smart-list-prefix${marker ? '' : ' smart-list-align-header'}`
+                            }).range(start, start + prefix.length));
+                        } else if (depth > 1) {
+                            // A numeric child may not be recognized as a native
+                            // list mark when its parent is a custom prefix.
+                            decorations.push(Decoration.mark({ class: 'smart-list-prefix' }).range(start, start + prefix.length));
                         }
                     }
                 } 
             }
         }
-        return builder.finish();
+        // Visible ranges and same-position widget/mark decorations can be
+        // discovered in a different order. CodeMirror requires sorted ranges.
+        return Decoration.set(decorations, true);
     }
 }, { decorations: v => v.decorations });
 
@@ -462,55 +737,45 @@ function autoFormatVisibleRanges(view: EditorView) {
         const startLine = state.doc.lineAt(from).number;
         const endLine = state.doc.lineAt(to).number;
 
-        let inCodeBlock = false;
-        for (let i = 1; i < startLine; i++) {
-            if (/^([ \t]*)(```|~~~)/.test(state.doc.line(i).text)) inCodeBlock = !inCodeBlock;
-        }
+        const visibleScopes = buildTokenScopes(state, startLine);
 
         for (let i = startLine; i <= endLine; i++) {
-            if (processedLines.has(i)) continue;
-
             const line = state.doc.line(i);
+            const previous = i > 1 ? state.doc.line(i - 1).text : undefined;
+            const visible = advanceListScope(visibleScopes, line.text, previous);
+            if (processedLines.has(i)) continue;
+            if (visible.skip) { processedLines.add(i); continue; }
 
-            if (/^([ \t]*)(```|~~~)/.test(line.text)) {
-                inCodeBlock = !inCodeBlock;
-                processedLines.add(i);
-                continue;
-            }
-            if (inCodeBlock) { processedLines.add(i); continue; }
-
-            if (isConsecutionBreaker(line.text) || line.text.trim() === '') { processedLines.add(i); continue; }
-
-            const isPureBullet = /^([ \t]*)([-*+])\s+/.test(line.text) && !PREFIX_REGEX.test(line.text);
+            const isPureBullet = /^([ \t]*)([-*+])\s+/.test(visible.content) && !PREFIX_REGEX.test(visible.content);
             if (isPureBullet) { processedLines.add(i); continue; }
 
-            if (!PREFIX_REGEX.test(line.text)) { processedLines.add(i); continue; }
+            if (!PREFIX_REGEX.test(visible.content)) { processedLines.add(i); continue; }
 
             let blockStart = i;
             while (blockStart > 1) {
                 const blockLineText = state.doc.line(blockStart - 1).text;
-                if (isConsecutionBreaker(blockLineText)) break;
+                const previousBlockLine = blockStart > 2 ? state.doc.line(blockStart - 2).text : undefined;
+                if (isConsecutionBreaker(blockLineText, previousBlockLine)) break;
                 blockStart--;
             }
 
             let blockEnd = i;
             while (blockEnd < state.doc.lines) {
                 const blockLineText = state.doc.line(blockEnd + 1).text;
-                if (isConsecutionBreaker(blockLineText)) break;
+                if (isConsecutionBreaker(blockLineText, state.doc.line(blockEnd).text)) break;
                 blockEnd++;
             }
 
-            let tokenStack = buildTokenStack(state, blockStart);
+            const scopes = buildTokenScopes(state, blockStart);
 
             for (let j = blockStart; j <= blockEnd; j++) {
                 processedLines.add(j);
                 const blockLine = state.doc.line(j);
-                const text = blockLine.text;
-
-                if (text.trim() === '') continue;
-                if (isConsecutionBreaker(text)) { tokenStack.length = 0; continue; }
-
-                if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) continue;
+                const previousBlockLine = j > 1 ? state.doc.line(j - 1).text : undefined;
+                const scoped = advanceListScope(scopes, blockLine.text, previousBlockLine);
+                if (scoped.skip) continue;
+                const text = scoped.content;
+                const tokenStack = scoped.scope.stack;
 
                 const pbMatch = text.match(/^([ \t]*)([-*+])\s+/);
                 if (pbMatch && !PREFIX_REGEX.test(text)) {
@@ -532,7 +797,7 @@ function autoFormatVisibleRanges(view: EditorView) {
 
                 const rewrite = rewritePrefix(indentStr, marker, userPrefix, spaces + content);
                 if (rewrite.changed) {
-                    changes.push({ from: blockLine.from, to: blockLine.to, insert: rewrite.newText });
+                    changes.push({ from: blockLine.from, to: blockLine.to, insert: scoped.quotePrefix + rewrite.newText });
                     hasRewrites = true;
                     tokenStack[indentLevel] = null;
                     tokenStack.splice(indentLevel + 1);
@@ -557,8 +822,8 @@ function autoFormatVisibleRanges(view: EditorView) {
 
                 const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
 
-                if (isRollbackNeeded(expectedTokens)) {
-                    changes.push({ from: blockLine.from, to: blockLine.to, insert: `${indentStr}- ${content}` });
+                if (hasOutOfRangeElement(userTokens) || hasMixedZero(userTokens) || isRollbackNeeded(expectedTokens)) {
+                    changes.push({ from: blockLine.from, to: blockLine.to, insert: `${scoped.quotePrefix}${indentStr}- ${content}` });
                     hasRewrites = true;
                     tokenStack[indentLevel] = null;
                     tokenStack.splice(indentLevel + 1);
@@ -569,9 +834,9 @@ function autoFormatVisibleRanges(view: EditorView) {
                 tokenStack.splice(indentLevel + 1);
 
                 const newPrefix = buildPrefixString(expectedTokens, userPrefix);
-                const finalText = indentStr + marker + newPrefix + spaces + content;
+                const finalText = scoped.quotePrefix + indentStr + marker + newPrefix + spaces + content;
 
-                if (finalText !== text) {
+                if (finalText !== blockLine.text) {
                     changes.push({ from: blockLine.from, to: blockLine.to, insert: finalText });
                     hasRewrites = true;
                 }
@@ -601,7 +866,8 @@ const smartSpacePlugin = Prec.highest(keymap.of([
             if (isLineInFencedCode(state, line.number)) return false;
 
             const textBeforeCursor = line.text.slice(0, selection.from - line.from);
-            const match = textBeforeCursor.match(SPACE_REGEX);
+            const quoted = parseQuoteLine(textBeforeCursor);
+            const match = quoted.content.match(SPACE_REGEX);
             if (!match) return false;
 
             const indentStr = match[1] || '';
@@ -619,7 +885,7 @@ const smartSpacePlugin = Prec.highest(keymap.of([
 
             const rewrite = rewritePrefix(indentStr, marker, typedPrefix, "");
             if (rewrite.changed) {
-                const insertText = rewrite.newText.replace(/\s+$/, '') + " ";
+                const insertText = quoted.quotePrefix + rewrite.newText.replace(/\s+$/, '') + " ";
                 view.dispatch({
                     changes: { from: line.from, to: selection.from, insert: insertText },
                     selection: { anchor: line.from + insertText.length },
@@ -648,8 +914,8 @@ const smartSpacePlugin = Prec.highest(keymap.of([
 
             const expectedTokens = getNextTokens(userTokens, tokenStack, targetIndentLevel, marker);
 
-            if (isRollbackNeeded(expectedTokens)) {
-                const insertText = `${indentStr}- `;
+            if (hasOutOfRangeElement(userTokens) || hasMixedZero(userTokens) || isRollbackNeeded(expectedTokens)) {
+                const insertText = `${quoted.quotePrefix}${indentStr}- `;
                 view.dispatch({
                     changes: { from: line.from, to: selection.from, insert: insertText },
                     selection: { anchor: line.from + insertText.length },
@@ -659,7 +925,7 @@ const smartSpacePlugin = Prec.highest(keymap.of([
             }
 
             const nextPrefix = buildPrefixString(expectedTokens, typedPrefix);
-            const insertText = `${indentStr}${marker}${nextPrefix} `;
+            const insertText = `${quoted.quotePrefix}${indentStr}${marker}${nextPrefix} `;
 
             view.dispatch({
                 changes: { from: line.from, to: selection.from, insert: insertText },
@@ -699,7 +965,8 @@ const smartEnterPlugin = Prec.highest(keymap.of([
             const textBeforeCursor = line.text.slice(0, selection.from - line.from);
             const textAfterCursor = line.text.slice(selection.from - line.from);
 
-            const match = textBeforeCursor.match(PREFIX_REGEX);
+            const quoted = parseQuoteLine(textBeforeCursor);
+            const match = quoted.content.match(PREFIX_REGEX);
             if (!match) return false;
 
             const indentStr = match[1] || '';
@@ -709,8 +976,8 @@ const smartEnterPlugin = Prec.highest(keymap.of([
             const content = match[5] || '';
 
             if (content.trim() === '' && textAfterCursor.trim() === '') {
-                if (getIndentLevel(line.text) > 0) return handleIndent(view, -1);
-                view.dispatch({ changes: { from: line.from, to: line.to, insert: '' }, userEvent: "smartlist.update" });
+                if (getIndentLevel(quoted.content) > 0) return handleIndent(view, -1);
+                view.dispatch({ changes: { from: line.from + quoted.quotePrefix.length, to: line.to, insert: '' }, userEvent: "smartlist.update" });
                 return true;
             }
 
@@ -721,7 +988,7 @@ const smartEnterPlugin = Prec.highest(keymap.of([
             if (lastToken) lastToken.value++;
 
             if (isRollbackNeeded(tokens)) {
-                const insertText = `\n${indentStr}- `;
+                const insertText = `\n${quoted.quotePrefix}${indentStr}- `;
                 view.dispatch({
                     changes: { from: selection.from, to: selection.from, insert: insertText },
                     selection: { anchor: selection.from + insertText.length },
@@ -741,7 +1008,7 @@ const smartEnterPlugin = Prec.highest(keymap.of([
                 }
             }
 
-            const insertText = `\n${indentStr}${nextMarker}${nextPrefix}${spaces}${nextContentCb}`;
+            const insertText = `\n${quoted.quotePrefix}${indentStr}${nextMarker}${nextPrefix}${spaces}${nextContentCb}`;
 
             view.dispatch({
                 changes: { from: selection.from, to: selection.from, insert: insertText },
@@ -769,29 +1036,34 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
 
     let isList = false;
     for (let i = fromLine.number; i <= toLine.number; i++) {
-        if (PREFIX_REGEX.test(state.doc.line(i).text)) { isList = true; break; }
+        if (PREFIX_REGEX.test(parseQuoteLine(state.doc.line(i).text).content)) { isList = true; break; }
     }
     if (!isList) return false;
 
     let startLineNum = fromLine.number;
     while (startLineNum > 1) {
-        if (isConsecutionBreaker(state.doc.line(startLineNum - 1).text)) break;
+        const previous = startLineNum > 2 ? state.doc.line(startLineNum - 2).text : undefined;
+        if (isConsecutionBreaker(state.doc.line(startLineNum - 1).text, previous)) break;
         startLineNum--;
     }
 
     let endLineNum = toLine.number;
     while (endLineNum < state.doc.lines) {
-        if (isConsecutionBreaker(state.doc.line(endLineNum + 1).text)) break;
+        if (isConsecutionBreaker(state.doc.line(endLineNum + 1).text, state.doc.line(endLineNum).text)) break;
         endLineNum++;
     }
 
     const changes: ChangeSpec[] =[];
     let hasRewrites = false;
-    let tokenStack = buildTokenStack(state, startLineNum);
+    const scopes = buildTokenScopes(state, startLineNum);
 
     for (let i = startLineNum; i <= endLineNum; i++) {
         const line = state.doc.line(i);
-        let text = line.text;
+        const previous = i > 1 ? state.doc.line(i - 1).text : undefined;
+        const scoped = advanceListScope(scopes, line.text, previous);
+        if (scoped.skip) continue;
+        const tokenStack = scoped.scope.stack;
+        let text = scoped.content;
         let convertedToUnordered = false;
 
         if (i >= fromLine.number && i <= toLine.number) {
@@ -811,7 +1083,9 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
                     const targetIndentLevel = getIndentLevel(newIndent);
                     let prevListLine = '';
                     for (let k = i - 1; k >= 1; k--) {
-                        const lineText = state.doc.line(k).text;
+                        const previousQuote = parseQuoteLine(state.doc.line(k).text);
+                        if (previousQuote.depth !== scoped.depth) break;
+                        const lineText = previousQuote.content;
                         if (lineText.trim() === '') continue;
                         const level = getIndentLevel(lineText);
                         if (level <= targetIndentLevel) { prevListLine = lineText; break; }
@@ -833,14 +1107,9 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
 
         if (text.trim() === '') continue;
 
-        if (isConsecutionBreaker(text) || convertedToUnordered) {
+        if (convertedToUnordered) {
             tokenStack.length = 0;
-            if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
-            continue;
-        }
-
-        if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/.test(text)) {
-            if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
+            if (scoped.quotePrefix + text !== line.text) changes.push({ from: line.from, to: line.to, insert: scoped.quotePrefix + text });
             continue;
         }
 
@@ -849,13 +1118,13 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
             const lvl = getIndentLevel(text);
             tokenStack[lvl] = { tokens:[], markerType: 'bullet', isUnordered: true };
             tokenStack.splice(lvl + 1);
-            if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
+            if (scoped.quotePrefix + text !== line.text) changes.push({ from: line.from, to: line.to, insert: scoped.quotePrefix + text });
             continue;
         }
 
         const match = text.match(PREFIX_REGEX);
         if (!match) {
-            if (text !== line.text) changes.push({ from: line.from, to: line.to, insert: text });
+            if (scoped.quotePrefix + text !== line.text) changes.push({ from: line.from, to: line.to, insert: scoped.quotePrefix + text });
             continue;
         }
 
@@ -868,7 +1137,7 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
 
         const rewrite = rewritePrefix(indentStr, marker, userPrefix, spaces + content);
         if (rewrite.changed) {
-            changes.push({ from: line.from, to: line.to, insert: rewrite.newText });
+            changes.push({ from: line.from, to: line.to, insert: scoped.quotePrefix + rewrite.newText });
             hasRewrites = true;
             tokenStack[indentLevel] = null;
             tokenStack.splice(indentLevel + 1);
@@ -891,10 +1160,11 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
             }
         }
 
-        const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
+        const nesting = dir === 1 && i >= fromLine.number && i <= toLine.number;
+        const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker, nesting);
 
-        if (isRollbackNeeded(expectedTokens)) {
-            changes.push({ from: line.from, to: line.to, insert: `${indentStr}- ${content}` });
+        if (hasOutOfRangeElement(userTokens) || hasMixedZero(userTokens) || isRollbackNeeded(expectedTokens)) {
+            changes.push({ from: line.from, to: line.to, insert: `${scoped.quotePrefix}${indentStr}- ${content}` });
             hasRewrites = true;
             tokenStack[indentLevel] = null;
             tokenStack.splice(indentLevel + 1);
@@ -905,7 +1175,7 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
         tokenStack.splice(indentLevel + 1);
 
         const newPrefix = buildPrefixString(expectedTokens, userPrefix);
-        const finalText = indentStr + marker + newPrefix + spaces + content;
+        const finalText = scoped.quotePrefix + indentStr + marker + newPrefix + spaces + content;
         
         if (finalText !== line.text) {
             changes.push({ from: line.from, to: line.to, insert: finalText });
@@ -924,10 +1194,25 @@ function handleIndent(view: EditorView, dir: 1 | -1): boolean {
 }
 
 export default class SmartOrderListPlugin extends Plugin {
-    onload() {
-        console.debug('Loading Smart Order List Plugin');
+    settings: SmartOrderListSettings = DEFAULT_SETTINGS;
 
-        this.registerEditorExtension([smartEnterPlugin, smartTabPlugin, smartSpacePlugin, autoRefreshPlugin, listMarkerDecorator]);
+    async onload() {
+        console.debug('Loading Smart Order List Plugin');
+        const storedSettings: unknown = await this.loadData();
+        this.settings = normalizeSettings(storedSettings);
+        const storedProfile = storedSettings && typeof storedSettings === 'object'
+            ? (storedSettings as Partial<SmartOrderListSettings>).indentationProfile
+            : undefined;
+        if (storedProfile !== this.settings.indentationProfile) {
+            await this.saveData(this.settings);
+        }
+        this.addSettingTab(new SmartOrderListSettingTab(this.app, this));
+        registerIndentationProfile(this, this.settings.indentationProfile);
+
+        const readingCopy = createReadingCopyTracker((doc, callback) =>
+            this.registerDomEvent(doc, 'copy', callback, true));
+
+        this.registerEditorExtension([smartEnterPlugin, smartTabPlugin, smartSpacePlugin, autoRefreshPlugin, listMarkerDecorator, liveHeaderAlignment, liveCalloutPlugin, createHotkeyCleanup(isLineInFencedCode)]);
 
         // --- READING VIEW POST PROCESSOR ---
         this.registerMarkdownPostProcessor((element, context) => {
@@ -936,29 +1221,27 @@ export default class SmartOrderListPlugin extends Plugin {
 
             const rawLines = sectionInfo.text.split('\n');
             const parsedLines: Record<number, ParsedLine> = {};
-            const tokenStack: (StackItem | null)[] =[];
-            let inCodeBlock = false;
+            const scopes = createListScopes();
 
             for (let i = 0; i < rawLines.length; i++) {
-                const text = rawLines[i];
-                if (text === undefined) continue;
-                const absLine = i; 
+                const raw = rawLines[i];
+                if (raw === undefined) continue;
+                // sectionInfo.text contains the full source text, so i is already
+                // the note-level line number used by parsedLines lookups below.
+                const absLine = i;
 
-                if (/^([ \t]*)(```|~~~)/.test(text)) {
-                    inCodeBlock = !inCodeBlock;
-                    continue;
-                }
-                if (inCodeBlock) continue;
-                if (text.trim() === '') continue;
-                if (isConsecutionBreaker(text)) { tokenStack.length = 0; continue; }
-                if (/^([ \t]*)>\s/.test(text) && !/^([ \t]*)>\s*\[!/i.test(text)) continue;
+                const scoped = advanceListScope(scopes, raw, i > 0 ? rawLines[i - 1] : undefined);
+                if (scoped.skip) continue;
+                const text = scoped.content;
+                const tokenStack = scoped.scope.stack;
 
                 const pbMatch = text.match(/^([ \t]*)([-*+])(\s+)/);
                 if (pbMatch && !PREFIX_REGEX.test(text)) {
                     const indentLevel = getIndentLevel(text);
                     tokenStack[indentLevel] = { tokens:[], markerType: 'bullet', isUnordered: true };
                     tokenStack.splice(indentLevel + 1);
-                    parsedLines[absLine] = { isOrphan: true, marker: pbMatch[2] || '', spaces: pbMatch[3] || '', depth: indentLevel + 1, text };
+                    const task = text.match(/^([ \t]*)([-*+])\s+\[([ xX-])\](?:[ \t]+|$)/);
+                    parsedLines[absLine] = { isOrphan: true, marker: pbMatch[2] || '', spaces: pbMatch[3] || '', depth: indentLevel + 1, taskTail: task?.[3], text, quoteScope: scoped.scope };
                     continue;
                 }
 
@@ -967,6 +1250,7 @@ export default class SmartOrderListPlugin extends Plugin {
                     const marker = match[2] || '';
                     const prefix = match[3] || '';
                     const spaces = match[4] || '';
+                    const content = match[5] || '';
                     const indentLevel = getIndentLevel(text);
                     const userTokens = parseTokens(prefix);
                     const currentMarkerType = /^[-*+]\s+\[[ xX-]\]\s+$/.test(marker) ? 'checkbox' : 'none';
@@ -980,82 +1264,148 @@ export default class SmartOrderListPlugin extends Plugin {
                     }
 
                     const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
-                    const expectedPrefix = buildPrefixString(expectedTokens, prefix);
-                    tokenStack[indentLevel] = { tokens: expectedTokens, markerType: currentMarkerType };
+                    const fallbackToBullet = isRollbackNeeded(userTokens) || isRollbackNeeded(expectedTokens);
+                    const expectedPrefix = fallbackToBullet ? undefined : buildPrefixString(expectedTokens, prefix);
+                    tokenStack[indentLevel] = fallbackToBullet
+                        ? { tokens: [], markerType: 'bullet', isUnordered: true }
+                        : { tokens: expectedTokens, markerType: currentMarkerType };
                     tokenStack.splice(indentLevel + 1);
 
-                    parsedLines[absLine] = { isOrphan: false, expectedPrefix, prefix, marker, spaces, isNativeOrdered: /^[1-9][0-9]*\.$/.test(prefix) && marker === '', isNativeUnordered: /^[-*+]\s+$/.test(marker) && !prefix, depth: indentLevel + 1 };
+                    const tailTask = !marker ? content.match(/^\[([ xX-])\](?:[ \t]+|$)/) : null;
+                    parsedLines[absLine] = { isOrphan: false, fallbackToBullet, expectedPrefix, prefix, marker, spaces, taskTail: tailTask?.[1], isNativeOrdered: /^(?:0|[1-9][0-9]*)\.$/.test(prefix) && marker === '', isNativeUnordered: /^[-*+]\s+$/.test(marker) && !prefix, depth: indentLevel + 1, quoteScope: scoped.scope };
                 }
             }
 
-            // 1. UNIFY NATIVE ROOT MARKERS & INJECT ORGANIC CASCADE
+            // 1. Keep Obsidian's native nested-list containers and replace only markers.
             const liElements = Array.from(element.querySelectorAll('li[data-line]'));
+            const nativeItems = new Map<number, HTMLElement>();
             for (let i = 0; i < liElements.length; i++) {
                 const blockEl = liElements[i];
                 if (!blockEl) continue;
+                if (blockEl instanceof HTMLElement) {
+                    blockEl.classList.remove('smart-list-reading-root');
+                }
                 const startLineNum = parseInt(blockEl.getAttribute('data-line') || '-1');
                 const absLine = sectionInfo.lineStart + startLineNum;
                 const lineData = parsedLines[absLine];
+                if (startLineNum >= 0 && blockEl instanceof HTMLElement) nativeItems.set(absLine, blockEl);
                 
                 if (!lineData) continue;
 
-                // --- NEW: INJECT ORGANIC CASCADE INTO NATIVE LISTS ---
+                if (lineData.depth === 1 && blockEl instanceof HTMLElement && blockEl.tagName === 'LI') {
+                    blockEl.classList.add('smart-list-reading-root');
+                }
+
+                // Mark native child lists so the plugin can find processed sections,
+                // but leave their native margin and padding untouched.
                 if (lineData.depth > 1) {
-                    let parentPrefixLen = 2; // Default for "1."
-                    for (let k = absLine - 1; k >= sectionInfo.lineStart; k--) {
-                        const pData = parsedLines[k];
-                        if (pData && pData.depth === lineData.depth - 1) {
-                            const pVis = pData.isOrphan ? pData.marker : (pData.marker + (pData.expectedPrefix || ''));
-                            const pClean = pVis.replace(/\s+$/, '');
-                            parentPrefixLen = 0;
-                            for (let c = 0; c < pClean.length; c++) {
-                                const char = pClean.charAt(c);
-                                if (/[0-9]/.test(char)) parentPrefixLen += 1;
-                                else if (char === '.') parentPrefixLen += 0.3;
-                                else if (char === ' ') parentPrefixLen += 0.5;
-                                else if (char === '-') parentPrefixLen += 0.6;
-                                else if (char.charCodeAt(0) > 255) parentPrefixLen += 2;
-                                else parentPrefixLen += 1;
-                            }
-                            break;
-                        }
-                    }
                     const parentListEl = blockEl.parentElement;
                     if (parentListEl && (parentListEl.tagName === 'UL' || parentListEl.tagName === 'OL')) {
                         parentListEl.classList.add('smart-list-reading');
-                        parentListEl.style.setProperty('--sol-parent-prefix-len', `${parentPrefixLen}ch`);
+                        parentListEl.classList.add('smart-list-reading-child');
                     }
                 }
 
                 // --- ORIGINAL: UNIFY NATIVE ROOT MARKERS ---
-                if (!lineData.isOrphan && lineData.isNativeOrdered) {
+                if (!lineData.isOrphan && !lineData.fallbackToBullet && lineData.isNativeOrdered) {
                     const htmlEl = blockEl as HTMLElement;
                     htmlEl.classList.add('smart-list-native-override-reading');
                     if (!htmlEl.querySelector('.smart-list-override-reading')) {
                         const overrideSpan = document.createElement('span');
                         overrideSpan.className = 'list-number smart-list-prefix smart-list-override-reading';
-                        overrideSpan.textContent = lineData.expectedPrefix || '';
+                        overrideSpan.textContent = `${lineData.expectedPrefix || ''} `;
                         htmlEl.insertBefore(overrideSpan, htmlEl.firstChild);
                     }
+                }
+
+                // Reuse Obsidian's bullet when present; a second marker duplicates it.
+                if ((lineData.isOrphan || lineData.fallbackToBullet) && lineData.taskTail === undefined && blockEl.tagName === 'LI') {
+                    const htmlEl = blockEl as HTMLElement;
+                    if (lineData.fallbackToBullet && lineData.marker) {
+                        htmlEl.querySelector(':scope > input.task-list-item-checkbox')?.remove();
+                    }
+                    htmlEl.classList.add('smart-list-native-unordered-reading', 'smart-list-bullet-head');
+                    const nativeBullet = htmlEl.querySelector<HTMLElement>(':scope > .list-bullet:not(.smart-list-bullet-reading)');
+                    const managedBullet = htmlEl.querySelector<HTMLElement>(':scope > .smart-list-bullet-reading');
+                    if (nativeBullet) {
+                        if (managedBullet) managedBullet.remove();
+                        nativeBullet.classList.add('smart-list-bullet-reading');
+                    } else if (!managedBullet) {
+                        const bulletSpan = document.createElement('span');
+                        bulletSpan.className = 'list-bullet smart-list-bullet-reading';
+                        const firstContent = Array.from(htmlEl.childNodes).find(node =>
+                            !(node instanceof HTMLElement &&
+                                (node.matches('ol, ul, .list-collapse-indicator') ||
+                                    node.classList.contains('task-list-item-checkbox')))
+                        );
+                        htmlEl.insertBefore(bulletSpan, firstContent ?? htmlEl.firstChild);
+                    }
+                }
+
+                const checkboxHead = ((lineData.isOrphan || lineData.fallbackToBullet) && lineData.taskTail !== undefined) ||
+                    (!lineData.fallbackToBullet && /^[-*+]\s+\[[ xX-]\]\s+$/.test(lineData.marker));
+                if (checkboxHead && blockEl.querySelector(':scope > input.task-list-item-checkbox')) {
+                    blockEl.classList.add('smart-list-checkbox-head');
                 }
             }
 
             // 2. BUILD TRUE NESTED DOM TREES
-            interface StackLevel { listEl: HTMLElement; itemEl: HTMLElement; }
+            interface StackLevel {
+                listEl: HTMLElement;
+                itemEl: HTMLElement;
+                parentItemEl: HTMLElement | null;
+                quoteScope: ListScope;
+            }
             const listStack: (StackLevel | null)[] =[];
+            const readingItems = new Map<number, HTMLElement>();
+            let activeQuoteScope: ListScope | null = null;
 
             for (let absLine = sectionInfo.lineStart; absLine <= sectionInfo.lineEnd; absLine++) {
                 const lineData = parsedLines[absLine];
                 if (!lineData) continue;
-                const needsFlattenedFix = (!lineData.isOrphan && !lineData.isNativeOrdered && !lineData.isNativeUnordered) || (lineData.isOrphan && lineData.depth > 1);
-                if (!needsFlattenedFix) continue;
+                if (lineData.quoteScope !== activeQuoteScope) {
+                    activeQuoteScope = lineData.quoteScope;
+                    listStack.length = 0;
+                }
+                const parentStackBefore = listStack[lineData.depth - 1];
+                const parentWasRebuilt = parentStackBefore?.itemEl.classList.contains('smart-list-custom-reading') === true;
+                const nativeItem = nativeItems.get(absLine);
+                const isPluginSpecificPrefix = lineData.fallbackToBullet ||
+                    (!lineData.isOrphan && (!lineData.isNativeOrdered || !nativeItem) && !lineData.isNativeUnordered);
+                // Keep ordinary Markdown bullets in Obsidian's native tree. Rebuilding
+                // them leaves the original <li> behind and can duplicate the nest.
+                const needsFlattenedFix = (isPluginSpecificPrefix || parentWasRebuilt) && !(lineData.fallbackToBullet && nativeItem);
+                const nativeCheckbox = lineData.marker && nativeItem?.querySelector(':scope > input.task-list-item-checkbox');
+                if (!needsFlattenedFix || nativeCheckbox) {
+                    // A native parent starts a new branch. Do not reuse a generated
+                    // child list that belonged to an earlier native parent.
+                    listStack.length = Math.min(listStack.length, lineData.depth);
+                    const nativeList = nativeItem?.parentElement;
+                    if (nativeItem && nativeList && (nativeList.tagName === 'UL' || nativeList.tagName === 'OL')) {
+                        readingItems.set(absLine, nativeItem);
+                        const parentItem = nativeList.parentElement?.tagName === 'LI'
+                            ? nativeList.parentElement
+                            : null;
+                        listStack[lineData.depth] = {
+                            listEl: nativeList,
+                            itemEl: nativeItem,
+                            parentItemEl: parentItem,
+                            quoteScope: lineData.quoteScope
+                        };
+                    }
+                    continue;
+                }
 
                 // This permanently solves the "- --list" bug without breaking the tree!
                 const targetPrefix = lineData.isOrphan ? (lineData.marker + lineData.spaces) : (lineData.marker + (lineData.prefix || ''));
                 const escapedTarget = targetPrefix.replace(/^\s+/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const regex = new RegExp(`(^|\\n)([ \\t]*)${escapedTarget}`);
 
-                const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+                // Search within the original list item for this source line first.
+                // Searching the whole rendered section can select a different row
+                // when multiple lines share the same prefix (for example, `1.1`).
+                const walkerRoot: Node = nativeItem ?? element;
+                const walker = document.createTreeWalker(walkerRoot, NodeFilter.SHOW_TEXT, null);
                 let textNode: Text | null = null;
                 let match: RegExpMatchArray | null = null;
 
@@ -1064,8 +1414,13 @@ export default class SmartOrderListPlugin extends Plugin {
                     if (!n) break;
                     let parent = n.parentNode;
                     let isCode = false;
-                    while (parent && parent !== element) {
-                        if (parent.nodeName === 'PRE' || parent.nodeName === 'CODE') { isCode = true; break; }
+                    while (parent && parent !== walkerRoot) {
+                        if (parent.nodeName === 'PRE' || parent.nodeName === 'CODE' ||
+                            (parent instanceof Element && parent.classList.contains('smart-list-prefix')) ||
+                            (nativeItem && parent.nodeName === 'LI')) {
+                            isCode = true;
+                            break;
+                        }
                         parent = parent.parentNode;
                     }
                     if (isCode) continue;
@@ -1079,79 +1434,79 @@ export default class SmartOrderListPlugin extends Plugin {
                     const replaceRegex = new RegExp(`^${escapedTarget}[ \\t]*`);
                     afterPrefixNode.nodeValue = afterPrefixNode.nodeValue?.replace(replaceRegex, '') || '';
                     afterPrefixNode.nodeValue = afterPrefixNode.nodeValue?.replace(/^\n/, '') || '';
+                    if (lineData.taskTail !== undefined) {
+                        afterPrefixNode.nodeValue = afterPrefixNode.nodeValue.replace(/^\[[ xX-]\][ \t]*/, '');
+                    }
 
                     const depth = lineData.depth;
                     let listEl: HTMLElement | null = null;
                     let itemEl = document.createElement('li');
                     itemEl.dir = 'auto';
                     itemEl.classList.add('smart-list-custom-reading');
+                    itemEl.setAttribute('data-line', String(absLine - sectionInfo.lineStart));
+                    readingItems.set(absLine, itemEl);
 
-                    // ==========================================
-                    // NEW: LIVELY EXACT WIDTH CALCULATION!
-                    // ==========================================
-                    const visualPrefix = lineData.isOrphan ? lineData.marker : (lineData.marker + (lineData.expectedPrefix || ''));
-                    const cleanPrefix = visualPrefix.replace(/\s+$/, '');
-                    let exactChWidth = 0;
-                    for (let c = 0; c < cleanPrefix.length; c++) {
-                        const char = cleanPrefix.charAt(c); // TS FIX: charAt guarantees a string!
-                        if (/[0-9]/.test(char)) exactChWidth += 1;          // Digits are 1ch
-                        else if (char === '.') exactChWidth += 0.3;         // Dots are thin
-                        else if (char === ' ') exactChWidth += 0.5;         // Spaces
-                        else if (char === '-') exactChWidth += 0.6;         // Bullets
-                        else if (char.charCodeAt(0) > 255) exactChWidth += 2; // Chinese chars
-                        else exactChWidth += 1;
-                    }
-                    exactChWidth += 0.5; // Add the visual gap
-                    itemEl.style.setProperty('--sol-curr-prefix', `${exactChWidth}ch`);
-                    // ==========================================
-
-                    if (lineData.isOrphan) {
-                        const bulletSpan = document.createElement('span');
-                        bulletSpan.className = 'list-bullet smart-list-bullet-reading';
-                        itemEl.appendChild(bulletSpan);
+                    if (lineData.isOrphan || lineData.fallbackToBullet) {
+                        if (lineData.taskTail !== undefined) {
+                            const checkbox = document.createElement('input');
+                            const lineInSection = String(absLine - sectionInfo.lineStart);
+                            itemEl.classList.add('task-list-item', 'smart-list-checkbox-head');
+                            itemEl.setAttribute('data-task', lineData.taskTail);
+                            itemEl.setAttribute('data-line', lineInSection);
+                            checkbox.type = 'checkbox';
+                            checkbox.className = 'task-list-item-checkbox';
+                            checkbox.setAttribute('data-line', lineInSection);
+                            checkbox.checked = lineData.taskTail !== ' ';
+                            if (checkbox.checked) itemEl.classList.add('is-checked');
+                            itemEl.appendChild(checkbox);
+                        } else {
+                            itemEl.classList.add('smart-list-bullet-head');
+                            const bulletSpan = document.createElement('span');
+                            bulletSpan.className = 'list-bullet smart-list-bullet-reading';
+                            itemEl.appendChild(bulletSpan);
+                        }
                     } else {
+                        const task = lineData.marker.match(/^[-*+]\s+\[([ xX-])\]\s+$/);
+                        const status = task?.[1] ?? lineData.taskTail;
+                        let checkbox: HTMLInputElement | undefined;
+                        if (status !== undefined) {
+                            checkbox = document.createElement('input');
+                            const lineInSection = String(absLine - sectionInfo.lineStart);
+                            itemEl.classList.add('task-list-item');
+                            itemEl.setAttribute('data-task', status);
+                            itemEl.setAttribute('data-line', lineInSection);
+                            checkbox.type = 'checkbox';
+                            checkbox.className = 'task-list-item-checkbox';
+                            checkbox.setAttribute('data-line', lineInSection);
+                            checkbox.checked = status !== ' ';
+                            if (checkbox.checked) itemEl.classList.add('is-checked');
+                            if (task) itemEl.classList.add('smart-list-checkbox-head');
+                        }
                         const prefixSpan = document.createElement('span');
                         prefixSpan.className = 'list-number smart-list-prefix smart-list-prefix-span-reading';
-                        prefixSpan.textContent = lineData.expectedPrefix || '';
+                        prefixSpan.textContent = `${lineData.expectedPrefix || ''} `;
+                        if (task && checkbox) itemEl.appendChild(checkbox);
                         itemEl.appendChild(prefixSpan);
+                        if (!task && checkbox) itemEl.appendChild(checkbox);
                     }
 
                     const prevStack = listStack[depth];
                     const parentStack = listStack[depth - 1];
+                    const parentItemEl = parentStack?.itemEl || null;
+                    const expectedListTag = lineData.isOrphan || lineData.fallbackToBullet ? 'UL' : 'OL';
+                    const canReuseList = prevStack &&
+                        prevStack.listEl.tagName === expectedListTag &&
+                        prevStack.parentItemEl === parentItemEl &&
+                        prevStack.quoteScope === lineData.quoteScope;
 
-                    if (prevStack && prevStack.listEl) {
+                    if (canReuseList) {
                         listEl = prevStack.listEl;
                         listEl.appendChild(itemEl);
                     } else {
-                        listEl = document.createElement(lineData.isOrphan ? 'ul' : 'ol');
-                        listEl.className = lineData.isOrphan ? 'has-list-bullet el-ul' : 'el-ol';
+                        listEl = document.createElement(expectedListTag.toLowerCase());
+                        listEl.className = expectedListTag === 'UL' ? 'has-list-bullet el-ul' : 'el-ol';
                         listEl.classList.add('smart-list-reading');
-
-                        // ==========================================
-                        // RESTORED: THE LIVELY PARENT CALCULATION!
-                        // ==========================================
-                        let parentPrefixLen = 2; // Default fallback
-                        for (let k = absLine - 1; k >= sectionInfo.lineStart; k--) {
-                            const pData = parsedLines[k];
-                            if (pData && pData.depth === depth - 1) {
-                                const pVis = pData.isOrphan ? pData.marker : (pData.marker + (pData.expectedPrefix || ''));
-                                const pClean = pVis.replace(/\s+$/, '');
-                                parentPrefixLen = 0;
-                                for (let c = 0; c < pClean.length; c++) {
-                                    const char = pClean.charAt(c);
-                                    if (/[0-9]/.test(char)) parentPrefixLen += 1;
-                                    else if (char === '.') parentPrefixLen += 0.3;
-                                    else if (char === ' ') parentPrefixLen += 0.5;
-                                    else if (char === '-') parentPrefixLen += 0.6;
-                                    else if (char.charCodeAt(0) > 255) parentPrefixLen += 2;
-                                    else parentPrefixLen += 1;
-                                }
-                                break;
-                            }
-                        }
-                        // Injects the exact width of the parent directly into the ol!
-                        listEl.style.setProperty('--sol-parent-prefix-len', `${parentPrefixLen}ch`);
-                        // ==========================================
+                        if (depth > 1) listEl.classList.add('smart-list-reading-child');
 
                         listEl.appendChild(itemEl);
 
@@ -1206,7 +1561,7 @@ export default class SmartOrderListPlugin extends Plugin {
                         }
                     }
                     
-                    listStack[depth] = { listEl, itemEl };
+                    listStack[depth] = { listEl, itemEl, parentItemEl, quoteScope: lineData.quoteScope };
                     listStack.length = depth + 1;
 
                     const parent = afterPrefixNode.parentNode;
@@ -1214,6 +1569,9 @@ export default class SmartOrderListPlugin extends Plugin {
                         let current: Node | null = afterPrefixNode;
                         while (current) {
                             const next: Node | null = current.nextSibling;
+                            // A generated child list can now be a sibling of the
+                            // original text. Never move an ancestor into itself.
+                            if (current.contains(itemEl)) break;
                             if (current.nodeName === 'BR') { parent.removeChild(current); break; }
                             if (current.nodeType === Node.TEXT_NODE) {
                                 const newlineIndex = current.nodeValue?.indexOf('\n');
@@ -1230,6 +1588,37 @@ export default class SmartOrderListPlugin extends Plugin {
                     }
                 }
             }
+            const readingParents = getReadingParentLines(
+                parsedLines,
+                sectionInfo.lineStart,
+                sectionInfo.lineEnd
+            );
+            repairReadingCustomHierarchy(
+                element,
+                parsedLines,
+                readingItems,
+                nativeItems,
+                readingParents,
+                sectionInfo.lineStart,
+                sectionInfo.lineEnd
+            );
+            const alignmentLines = new Map<number, ReadingAlignmentLine>();
+            for (let line = sectionInfo.lineStart; line <= sectionInfo.lineEnd; line++) {
+                const lineData = parsedLines[line];
+                if (!lineData) continue;
+                alignmentLines.set(line, {
+                    depth: lineData.depth,
+                    slotCount: lineData.isOrphan || lineData.fallbackToBullet ? 0 : parseTokens(lineData.expectedPrefix || lineData.prefix || '').length
+                });
+            }
+            const alignmentItems = new Map(nativeItems);
+            for (const [line, item] of readingItems) alignmentItems.set(line, item);
+            applyReadingNestDistances(element, alignmentLines, readingParents, alignmentItems);
+            if (element.querySelector('.smart-list-override-reading, .smart-list-prefix-span-reading')) {
+                context.addChild(new ReadingHeaderObserver(element));
+            }
+            readingCopy.track(element, sectionInfo, new Set(Object.keys(parsedLines).map(Number)),
+                () => context.getSectionInfo(element));
         });
 
         this.addCommand({
@@ -1241,37 +1630,26 @@ export default class SmartOrderListPlugin extends Plugin {
 
                 const lines = text.split('\n');
                 const result: string[] =[];
-                let tokenStack: (StackItem | null)[] =[];
-                let inCodeBlock = false;
+                const scopes = createListScopes();
 
-                for (const line of lines) {
-                    if (/^([ \t]*)(```|~~~)/.test(line)) {
-                        inCodeBlock = !inCodeBlock;
-                        tokenStack =[]; 
-                        result.push(line);
-                        continue;
-                    }
-                    if (inCodeBlock) { result.push(line); continue; }
-
-                    if (line.trim() === '') { result.push(line); continue; }
-                    if (isConsecutionBreaker(line)) { tokenStack =[]; result.push(line); continue; }
-
-                    if (/^([ \t]*)>\s/.test(line) && !/^([ \t]*)>\s*\[!/.test(line)) {
-                        result.push(line);
-                        continue;
-                    }
+                for (let i = 0; i < lines.length; i++) {
+                    const raw = lines[i]!;
+                    const scoped = advanceListScope(scopes, raw, i > 0 ? lines[i - 1] : undefined);
+                    if (scoped.skip) { result.push(raw); continue; }
+                    const line = scoped.content;
+                    const tokenStack = scoped.scope.stack;
 
                     const isPureBullet = /^([ \t]*)([-*+])\s+/.test(line) && !PREFIX_REGEX.test(line);
                     if (isPureBullet) {
                         const lvl = getIndentLevel(line);
                         tokenStack[lvl] = { tokens:[], markerType: 'bullet', isUnordered: true };
                         tokenStack.splice(lvl + 1);
-                        result.push(line);
+                        result.push(raw);
                         continue;
                     }
 
                     const match = line.match(PREFIX_REGEX);
-                    if (!match) { result.push(line); continue; }
+                    if (!match) { result.push(raw); continue; }
 
                     const indentStr = match[1] || '';
                     const indentLevel = getIndentLevel(line);
@@ -1282,7 +1660,7 @@ export default class SmartOrderListPlugin extends Plugin {
 
                     const rewrite = rewritePrefix(indentStr, marker, userPrefix, spaces + content);
                     if (rewrite.changed) {
-                        result.push(rewrite.newText);
+                        result.push(scoped.quotePrefix + rewrite.newText);
                         tokenStack[indentLevel] = null;
                         tokenStack.splice(indentLevel + 1);
                         continue;
@@ -1299,14 +1677,14 @@ export default class SmartOrderListPlugin extends Plugin {
                                                  (lastUser?.type !== prevLast?.type) || 
                                                  (currentMarkerType !== prevSameLevel.markerType);
                         if (isDifferentStyle) {
-                            tokenStack =[];
+                            tokenStack.length = 0;
                         }
                     }
 
                     const expectedTokens = getNextTokens(userTokens, tokenStack, indentLevel, marker);
 
-                    if (isRollbackNeeded(expectedTokens)) {
-                        result.push(`${indentStr}- ${content}`);
+                    if (hasOutOfRangeElement(userTokens) || hasMixedZero(userTokens) || isRollbackNeeded(expectedTokens)) {
+                        result.push(`${scoped.quotePrefix}${indentStr}- ${content}`);
                         tokenStack[indentLevel] = null;
                         tokenStack.splice(indentLevel + 1);
                         continue;
@@ -1316,10 +1694,11 @@ export default class SmartOrderListPlugin extends Plugin {
                     tokenStack.splice(indentLevel + 1);
 
                     const newPrefix = buildPrefixString(expectedTokens, userPrefix);
-                    result.push(`${indentStr}${marker}${newPrefix}${spaces}${content}`);
+                    result.push(`${scoped.quotePrefix}${indentStr}${marker}${newPrefix}${spaces}${content}`);
                 }
                 editor.replaceSelection(result.join('\n'));
             }
         });
     }
+
 }
