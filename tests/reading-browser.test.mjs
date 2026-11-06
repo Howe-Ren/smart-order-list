@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
+import { obsidianDomFixture } from './obsidian-dom-fixture.mjs';
 
 // Exercise the actual registered postprocessor in a browser DOM. The fixture
 // models Obsidian's rendered list markup; a real Obsidian test is still needed
@@ -115,6 +116,30 @@ test('Reading postprocessor retains parents, prefix spacing, and task markup', {
                 clipboard.getData('text/plain') === '1. a\n    1.1 b\n2. c\n    2.1 d');
         } catch (error) {
             outcomes.push({ name: 'ordered fixture: ' + String(error.stack || error), ok: false });
+        }
+        try {
+            const frame = document.createElement('iframe');
+            document.body.appendChild(frame);
+            installObsidianDomHelpers(frame.contentWindow);
+            const frameDoc = frame.contentDocument;
+            const container = frameDoc.createElement('div');
+            container.className = 'markdown-rendered';
+            container.innerHTML = '<ol><li data-line="0">a<br>1.1 b</li></ol>';
+            frameDoc.body.appendChild(container);
+            window.readingProcessor(container, {
+                getSectionInfo: () => ({ text: '1. a\n\t1.1 b', lineStart: 0, lineEnd: 1 }),
+                addChild: child => child.onload()
+            });
+            const root = container.querySelector('li[data-line="0"]');
+            const child = root?.querySelector(':scope > ol > li[data-line="1"]');
+            verify('a different-window native root receives its prefix', root?.textContent.startsWith('1. a'));
+            verify('a different-window child stays under its parent', child?.textContent === '1.1 b');
+            verify('created list nodes belong to the target window', child?.ownerDocument === frameDoc);
+            const collapseIcon = root?.querySelector(':scope > .list-collapse-indicator svg path');
+            verify('the different-window collapse icon remains SVG',
+                collapseIcon?.ownerDocument === frameDoc && collapseIcon?.namespaceURI === 'http://www.w3.org/2000/svg');
+        } catch (error) {
+            outcomes.push({ name: 'different-window fixture: ' + String(error.stack || error), ok: false });
         }
         try {
             const zero = processFixture(
@@ -365,7 +390,7 @@ test('Reading postprocessor retains parents, prefix spacing, and task markup', {
             .markdown-rendered .list-bullet { float: left; }
             .markdown-rendered .task-list-item-checkbox { width: 14px; height: 14px; margin: 0 2px 0 0; vertical-align: middle; }`;
         const styles = readFileSync('styles.css', 'utf8');
-        const html = `<!doctype html><html><head><style>${theme}\n${styles}</style></head><body><script>${bundle.outputFiles[0].text}</script><script>${alignmentBundle.outputFiles[0].text}</script><script>${fixture}</script></body></html>`;
+        const html = `<!doctype html><html><head><style>${theme}\n${styles}</style></head><body><script>${obsidianDomFixture}</script><script>${bundle.outputFiles[0].text}</script><script>${alignmentBundle.outputFiles[0].text}</script><script>${fixture}</script></body></html>`;
         writeFileSync(htmlPath, html);
         const output = execFileSync(browser, [
             '--headless=new', '--disable-gpu', '--no-sandbox',

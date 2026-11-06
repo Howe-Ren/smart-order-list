@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
+import { obsidianDomFixture } from './obsidian-dom-fixture.mjs';
 
 const browser = [process.env.SMART_ORDER_TEST_BROWSER,
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -173,6 +174,24 @@ test('Live Preview decorations render and safely toggle unsupported task markers
             const before = untouched.innerHTML;
             check('unmatched callouts are left untouched', !Fixture.enhanceLiveCallout(fake, untouched) && untouched.innerHTML === before);
         } catch (error) { results.push({ name: 'callout: ' + String(error.stack || error), ok: false }); }
+        try {
+            const frame = document.createElement('iframe');
+            document.body.appendChild(frame);
+            installObsidianDomHelpers(frame.contentWindow);
+            const frameDoc = frame.contentDocument;
+            const callout = frameDoc.createElement('div');
+            callout.className = 'callout';
+            callout.innerHTML = '<div class="callout-content"><ol><li>parent<br>1.1 [ ] child</li></ol></div>';
+            frameDoc.body.appendChild(callout);
+            const source = '> [!note]\n> 1. parent\n> \t1.1 [ ] child';
+            const fake = { state: Fixture.EditorState.create({ doc: source }), posAtDOM: () => 0,
+                dispatch(spec) { this.state = this.state.update(spec).state; } };
+            check('a different-window callout is recognized', Fixture.enhanceLiveCallout(fake, callout));
+            const checkbox = callout.querySelector('input.smart-list-callout-task');
+            check('a different-window callout creates its checkbox in that window', checkbox?.ownerDocument === frameDoc);
+            checkbox?.click();
+            check('a different-window checkbox updates its own source', fake.state.doc.toString() === source.replace('[ ]', '[x]'));
+        } catch (error) { results.push({ name: 'different-window callout: ' + String(error.stack || error), ok: false }); }
         document.body.dataset.result = btoa(unescape(encodeURIComponent(JSON.stringify(results))));
         })();
     `;
@@ -181,7 +200,7 @@ test('Live Preview decorations render and safely toggle unsupported task markers
     try {
         const file = path.join(dir, 'fixture.html');
         const styles = readFileSync('styles.css', 'utf8');
-        writeFileSync(file, `<!doctype html><html><head><style>${styles}</style></head><body><script>${bundle.outputFiles[0].text}</script><script>${fixture}</script></body></html>`);
+        writeFileSync(file, `<!doctype html><html><head><style>${styles}</style></head><body><script>${obsidianDomFixture}</script><script>${bundle.outputFiles[0].text}</script><script>${fixture}</script></body></html>`);
         const output = execFileSync(browser, ['--headless=new', '--disable-gpu', '--no-sandbox',
             '--virtual-time-budget=1000',
             `--user-data-dir=${path.join(dir, 'profile')}`, '--dump-dom', pathToFileURL(file).href],

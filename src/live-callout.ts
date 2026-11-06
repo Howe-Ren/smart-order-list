@@ -95,16 +95,15 @@ export function enhanceLiveCallout(view: EditorView, callout: Element): boolean 
             const parent = stack[task.depth - 1]!;
             let list = Array.from(parent.children).find(child => child.classList.contains('smart-list-callout-list'));
             if (!list) {
-                list = doc.createElement('ol');
+                list = parent.createEl('ol');
                 list.className = 'smart-list-callout-list';
-                parent.appendChild(list);
             }
-            const item = doc.createElement('li');
+            const item = list.createEl('li');
             item.className = 'smart-list-callout-item';
-            const prefix = doc.createElement('span');
+            const prefix = item.createEl('span');
             prefix.className = 'smart-list-prefix';
             prefix.textContent = `${task.prefix} `;
-            const checkbox = doc.createElement('input');
+            const checkbox = item.createEl('input');
             checkbox.type = 'checkbox';
             checkbox.className = 'task-list-item-checkbox smart-list-callout-task';
             checkbox.setAttribute('aria-label', 'Toggle task');
@@ -129,11 +128,10 @@ export function enhanceLiveCallout(view: EditorView, callout: Element): boolean 
                 task.status = next;
                 expectedSource = line.text.slice(0, marker + 1) + next + line.text.slice(marker + 2);
             });
-            item.append(prefix, checkbox, doc.createTextNode(' '));
+            item.append(doc.createTextNode(' '));
             segment.text.nodeValue = (segment.text.nodeValue || '').slice(segment.prefixLength);
             segment.separator.parentNode?.removeChild(segment.separator);
             for (const node of segment.nodes) item.appendChild(node);
-            list.appendChild(item);
             stack[task.depth] = item;
             stack.length = task.depth + 1;
         }

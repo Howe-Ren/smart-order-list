@@ -31,5 +31,8 @@
 		"@codemirror/view": "^6.39.16",
 		"@lezer/common": "^1.5.1",
 		"obsidian": "latest"
+	},
+	"overrides": {
+		"moment": "2.31.0"
 	}
 }

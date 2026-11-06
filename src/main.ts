@@ -16,6 +16,7 @@ import { applyReadingNestDistances, type ReadingAlignmentLine } from './reading-
 import { ReadingHeaderObserver } from './reading-header-observer';
 import { DEFAULT_SETTINGS, normalizeSettings, type SmartOrderListSettings } from './settings';
 import { SmartOrderListSettingTab } from './settings-tab';
+import { isElement, isHtmlElement } from './dom-type-guards';
 
 // --- CHINESE NUMERAL DICTIONARY ---
 const ZH_DIGITS =['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
@@ -105,14 +106,14 @@ function ensureReadingCollapseIndicator(item: HTMLElement): void {
     item.classList.add('has-list-children');
     if (item.querySelector('.list-collapse-indicator')) return;
 
-    const collapseDiv = document.createElement('div');
+    const collapseDiv = item.createDiv();
     collapseDiv.className = 'list-collapse-indicator collapse-indicator collapse-icon';
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const svg = item.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 100 100');
     svg.setAttribute('class', 'right-triangle');
     svg.setAttribute('width', '8');
     svg.setAttribute('height', '8');
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const path = item.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
     svg.appendChild(path);
     collapseDiv.appendChild(svg);
@@ -182,27 +183,26 @@ function repairReadingCustomHierarchy(
         const nativeTaskHeader = item === nativeItems.get(line) && /^[-*+]\s+\[/.test(lineData.marker);
         const listTag = lineData.isOrphan || lineData.fallbackToBullet || nativeTaskHeader ? 'UL' : 'OL';
         const existingLists = Array.from(parentItem.children).filter((child): child is HTMLElement =>
-            child instanceof HTMLElement && child.tagName === listTag
+            isHtmlElement(child) && child.tagName === listTag
         );
         let childList = existingLists.find(list => list.classList.contains('smart-list-reading-child')) ?? existingLists[0];
         if (!childList) {
-            childList = document.createElement(listTag.toLowerCase());
+            childList = parentItem.createEl(listTag === 'UL' ? 'ul' : 'ol');
             if (listTag === 'UL') childList.classList.add('has-list-bullet', 'el-ul');
             else childList.classList.add('el-ol');
-            parentItem.appendChild(childList);
         }
         childList.classList.add('smart-list-reading', 'smart-list-reading-child');
 
         const oldList = item.parentElement;
         if (oldList !== childList) {
             childList.appendChild(item);
-            if (oldList instanceof HTMLElement &&
+            if (isHtmlElement(oldList) &&
                 (oldList.tagName === 'OL' || oldList.tagName === 'UL') &&
                 oldList.classList.contains('smart-list-reading-child') &&
                 oldList.children.length === 0) {
                 const oldParent = oldList.parentElement;
                 oldList.remove();
-                if (oldParent instanceof HTMLElement && oldParent.tagName === 'LI' &&
+                if (isHtmlElement(oldParent) && oldParent.tagName === 'LI' &&
                     !Array.from(oldParent.children).some(child => child.tagName === 'OL' || child.tagName === 'UL')) {
                     oldParent.classList.remove('has-list-children');
                     oldParent.querySelector('.list-collapse-indicator')?.remove();
@@ -221,7 +221,7 @@ function repairReadingCustomHierarchy(
     };
     for (const list of Array.from(element.querySelectorAll<HTMLElement>('ol.smart-list-reading-child, ul.smart-list-reading-child'))) {
         const items = Array.from(list.children).filter((child): child is HTMLElement =>
-            child instanceof HTMLElement && child.tagName === 'LI'
+            isHtmlElement(child) && child.tagName === 'LI'
         );
         items.sort((a, b) => getLine(a) - getLine(b));
         for (const item of items) list.appendChild(item);
@@ -1282,17 +1282,17 @@ export default class SmartOrderListPlugin extends Plugin {
             for (let i = 0; i < liElements.length; i++) {
                 const blockEl = liElements[i];
                 if (!blockEl) continue;
-                if (blockEl instanceof HTMLElement) {
+                if (isHtmlElement(blockEl)) {
                     blockEl.classList.remove('smart-list-reading-root');
                 }
                 const startLineNum = parseInt(blockEl.getAttribute('data-line') || '-1');
                 const absLine = sectionInfo.lineStart + startLineNum;
                 const lineData = parsedLines[absLine];
-                if (startLineNum >= 0 && blockEl instanceof HTMLElement) nativeItems.set(absLine, blockEl);
+                if (startLineNum >= 0 && isHtmlElement(blockEl)) nativeItems.set(absLine, blockEl);
                 
                 if (!lineData) continue;
 
-                if (lineData.depth === 1 && blockEl instanceof HTMLElement && blockEl.tagName === 'LI') {
+                if (lineData.depth === 1 && isHtmlElement(blockEl) && blockEl.tagName === 'LI') {
                     blockEl.classList.add('smart-list-reading-root');
                 }
 
@@ -1311,7 +1311,7 @@ export default class SmartOrderListPlugin extends Plugin {
                     const htmlEl = blockEl as HTMLElement;
                     htmlEl.classList.add('smart-list-native-override-reading');
                     if (!htmlEl.querySelector('.smart-list-override-reading')) {
-                        const overrideSpan = document.createElement('span');
+                        const overrideSpan = htmlEl.createEl('span');
                         overrideSpan.className = 'list-number smart-list-prefix smart-list-override-reading';
                         overrideSpan.textContent = `${lineData.expectedPrefix || ''} `;
                         htmlEl.insertBefore(overrideSpan, htmlEl.firstChild);
@@ -1331,13 +1331,13 @@ export default class SmartOrderListPlugin extends Plugin {
                         if (managedBullet) managedBullet.remove();
                         nativeBullet.classList.add('smart-list-bullet-reading');
                     } else if (!managedBullet) {
-                        const bulletSpan = document.createElement('span');
-                        bulletSpan.className = 'list-bullet smart-list-bullet-reading';
                         const firstContent = Array.from(htmlEl.childNodes).find(node =>
-                            !(node instanceof HTMLElement &&
+                            !(isHtmlElement(node) &&
                                 (node.matches('ol, ul, .list-collapse-indicator') ||
                                     node.classList.contains('task-list-item-checkbox')))
                         );
+                        const bulletSpan = htmlEl.createEl('span');
+                        bulletSpan.className = 'list-bullet smart-list-bullet-reading';
                         htmlEl.insertBefore(bulletSpan, firstContent ?? htmlEl.firstChild);
                     }
                 }
@@ -1416,7 +1416,7 @@ export default class SmartOrderListPlugin extends Plugin {
                     let isCode = false;
                     while (parent && parent !== walkerRoot) {
                         if (parent.nodeName === 'PRE' || parent.nodeName === 'CODE' ||
-                            (parent instanceof Element && parent.classList.contains('smart-list-prefix')) ||
+                            (isElement(parent) && parent.classList.contains('smart-list-prefix')) ||
                             (nativeItem && parent.nodeName === 'LI')) {
                             isCode = true;
                             break;
@@ -1440,7 +1440,7 @@ export default class SmartOrderListPlugin extends Plugin {
 
                     const depth = lineData.depth;
                     let listEl: HTMLElement | null = null;
-                    let itemEl = document.createElement('li');
+                    const itemEl = element.ownerDocument.createElement('li');
                     itemEl.dir = 'auto';
                     itemEl.classList.add('smart-list-custom-reading');
                     itemEl.setAttribute('data-line', String(absLine - sectionInfo.lineStart));
@@ -1448,7 +1448,7 @@ export default class SmartOrderListPlugin extends Plugin {
 
                     if (lineData.isOrphan || lineData.fallbackToBullet) {
                         if (lineData.taskTail !== undefined) {
-                            const checkbox = document.createElement('input');
+                            const checkbox = itemEl.createEl('input');
                             const lineInSection = String(absLine - sectionInfo.lineStart);
                             itemEl.classList.add('task-list-item', 'smart-list-checkbox-head');
                             itemEl.setAttribute('data-task', lineData.taskTail);
@@ -1458,19 +1458,17 @@ export default class SmartOrderListPlugin extends Plugin {
                             checkbox.setAttribute('data-line', lineInSection);
                             checkbox.checked = lineData.taskTail !== ' ';
                             if (checkbox.checked) itemEl.classList.add('is-checked');
-                            itemEl.appendChild(checkbox);
                         } else {
                             itemEl.classList.add('smart-list-bullet-head');
-                            const bulletSpan = document.createElement('span');
+                            const bulletSpan = itemEl.createEl('span');
                             bulletSpan.className = 'list-bullet smart-list-bullet-reading';
-                            itemEl.appendChild(bulletSpan);
                         }
                     } else {
                         const task = lineData.marker.match(/^[-*+]\s+\[([ xX-])\]\s+$/);
                         const status = task?.[1] ?? lineData.taskTail;
                         let checkbox: HTMLInputElement | undefined;
                         if (status !== undefined) {
-                            checkbox = document.createElement('input');
+                            checkbox = itemEl.createEl('input');
                             const lineInSection = String(absLine - sectionInfo.lineStart);
                             itemEl.classList.add('task-list-item');
                             itemEl.setAttribute('data-task', status);
@@ -1482,12 +1480,10 @@ export default class SmartOrderListPlugin extends Plugin {
                             if (checkbox.checked) itemEl.classList.add('is-checked');
                             if (task) itemEl.classList.add('smart-list-checkbox-head');
                         }
-                        const prefixSpan = document.createElement('span');
+                        const prefixSpan = itemEl.createEl('span');
                         prefixSpan.className = 'list-number smart-list-prefix smart-list-prefix-span-reading';
                         prefixSpan.textContent = `${lineData.expectedPrefix || ''} `;
-                        if (task && checkbox) itemEl.appendChild(checkbox);
-                        itemEl.appendChild(prefixSpan);
-                        if (!task && checkbox) itemEl.appendChild(checkbox);
+                        if (!task && checkbox) itemEl.insertBefore(prefixSpan, checkbox);
                     }
 
                     const prevStack = listStack[depth];
@@ -1503,7 +1499,7 @@ export default class SmartOrderListPlugin extends Plugin {
                         listEl = prevStack.listEl;
                         listEl.appendChild(itemEl);
                     } else {
-                        listEl = document.createElement(expectedListTag.toLowerCase());
+                        listEl = element.ownerDocument.createElement(expectedListTag.toLowerCase());
                         listEl.className = expectedListTag === 'UL' ? 'has-list-bullet el-ul' : 'el-ol';
                         listEl.classList.add('smart-list-reading');
                         if (depth > 1) listEl.classList.add('smart-list-reading-child');
@@ -1512,23 +1508,7 @@ export default class SmartOrderListPlugin extends Plugin {
 
                         if (parentStack && parentStack.itemEl) {
                             parentStack.itemEl.appendChild(listEl);
-                            parentStack.itemEl.classList.add('has-list-children');
-                            if (!parentStack.itemEl.querySelector('.list-collapse-indicator')) {
-                                const collapseDiv = document.createElement('div');
-                                collapseDiv.className = 'list-collapse-indicator collapse-indicator collapse-icon';
-                                
-                                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                                svg.setAttribute('viewBox', '0 0 100 100');
-                                svg.setAttribute('class', 'right-triangle');
-                                svg.setAttribute('width', '8');
-                                svg.setAttribute('height', '8');
-                                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                                path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
-                                svg.appendChild(path);
-                                collapseDiv.appendChild(svg);
-                                
-                                parentStack.itemEl.insertBefore(collapseDiv, parentStack.itemEl.firstChild);
-                            }
+                            ensureReadingCollapseIndicator(parentStack.itemEl);
                         } else {
                             const parent = afterPrefixNode.parentNode;
                             if (parent) {
@@ -1539,23 +1519,7 @@ export default class SmartOrderListPlugin extends Plugin {
                                 }
                                 if (nativeLi && nativeLi.nodeName === 'LI') {
                                     const liEl = nativeLi as HTMLElement;
-                                    liEl.classList.add('has-list-children');
-                                    if (!liEl.querySelector('.list-collapse-indicator')) {
-                                        const collapseDiv = document.createElement('div');
-                                        collapseDiv.className = 'list-collapse-indicator collapse-indicator collapse-icon';
-                                        
-                                        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                                        svg.setAttribute('viewBox', '0 0 100 100');
-                                        svg.setAttribute('class', 'right-triangle');
-                                        svg.setAttribute('width', '8');
-                                        svg.setAttribute('height', '8');
-                                        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                                        path.setAttribute('d', 'M82.32,49.61L25.33,16.72c-1.39-0.8-3.1-0.8-4.49,0c-1.39,0.8-2.25,2.28-2.25,3.89v65.78c0,1.61,0.86,3.09,2.25,3.89 c0.69,0.4,1.47,0.6,2.25,0.6c0.77,0,1.55-0.2,2.24-0.6l56.99-32.89c1.39-0.8,2.25-2.28,2.25-3.89 C84.57,51.89,83.71,50.41,82.32,49.61z');
-                                        svg.appendChild(path);
-                                        collapseDiv.appendChild(svg);
-                                        
-                                        liEl.insertBefore(collapseDiv, liEl.firstChild);
-                                    }
+                                    ensureReadingCollapseIndicator(liEl);
                                 }
                             }
                         }
