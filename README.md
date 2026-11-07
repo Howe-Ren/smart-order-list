@@ -36,7 +36,9 @@ Smart Order List maintains ordered and nested list prefixes as you edit in Obsid
 - Use task checkboxes with ordered prefixes, including inside plain blockquotes.
 - Choose between fixed and dynamic Reading-view indentation.
 
-## 3. Quick start
+## 3. Usage
+
+### 3.1 Quick start
 
 1. Type `1.` followed by `Space`, then enter an item.
 2. Press `Enter` to start the next item.
@@ -48,6 +50,38 @@ For example, indenting the second item produces a nested prefix:
 1. Parent
     1.1 Child
 ```
+
+### 3.2 Full reference
+
+**File hierarchy**
+
+The ZIP contains a `Smart Order List` reference folder:
+
+```text
+Smart Order List/
+├── README.md
+└── Assets/
+    ├── Archive.md
+    └── attachments/
+```
+
+**What is the package?**
+
+The full reference shares the author's journey of ideas behind Smart Order List, including terminology, principles, examples, and development notes.
+
+**Who is it for?**
+
+- For basic use, this README provides a concise overview and quick start.
+- For more detailed use, the full reference covers the underlying principles, logic, and examples.
+
+**How to use it**
+
+1. Download [Smart-Order-List-Reference-3.0.1.zip](https://github.com/Howe-Ren/smart-order-list/releases/download/3.0.1/Smart-Order-List-Reference-3.0.1.zip) from the release assets.
+2. Extract the ZIP and copy its `Smart Order List` folder into the root of your Obsidian vault.
+3. Under **Settings → Community plugins**, ensure **Smart Order List** is installed and enabled in that vault.
+4. Open `Smart Order List/README.md` in Obsidian.
+
+If your vault already has a `Smart Order List` folder, check for existing files before replacing them.
 
 ## 4. Element table
 
