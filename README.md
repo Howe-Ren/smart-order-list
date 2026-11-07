@@ -70,6 +70,8 @@ For example, indenting the second item produces a nested prefix:
 
 ### 3.2 Full reference
 
+<a href="https://www.youtube.com/watch?v=L1OMx-YaDXA"><img src="https://i.ytimg.com/vi/L1OMx-YaDXA/maxresdefault.jpg" alt="Watch the Smart Order List full reference demonstration on YouTube" width="480"></a>
+
 #### 3.2.1 Description 
 - **File hierarchy:** 
   ```text
@@ -89,7 +91,7 @@ For example, indenting the second item produces a nested prefix:
 
 #### 3.2.2 Demonstration (video) 
 1. Where to **download** the package: [`Smart-Order-List-Reference-3.0.1.zip`](https://github.com/Howe-Ren/smart-order-list/releases/download/3.0.1/Smart-Order-List-Reference-3.0.1.zip) from [Release 3.0.1 page](https://github.com/Howe-Ren/smart-order-list/releases/tag/3.0.1) 
-2. How to **extract** the compressed package: Extract: Extracted > Enter decompression's root-dir > **Copy** folder `./Smart Order List` to vault's **root** path 
+2. How to **extract** the compressed package: Extracted > Enter decompression's root-dir > **Copy** folder `./Smart Order List` to vault's **root** path 
 3. How to make the package files **effective**: Enable the *plugin* 
 
 ## 4. Element table
