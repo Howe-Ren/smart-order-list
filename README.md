@@ -53,35 +53,26 @@ For example, indenting the second item produces a nested prefix:
 
 ### 3.2 Full reference
 
-**File hierarchy**
-
-The ZIP contains a `Smart Order List` reference folder:
-
-```text
-Smart Order List/
-├── README.md
-└── Assets/
-    ├── Archive.md
-    └── attachments/
-```
-
-**What is the package?**
-
-The full reference shares the author's journey of ideas behind Smart Order List, including terminology, principles, examples, and development notes.
-
-**Who is it for?**
-
-- For basic use, this README provides a concise overview and quick start.
-- For more detailed use, the full reference covers the underlying principles, logic, and examples.
-
-**How to use it**
-
-1. Download [Smart-Order-List-Reference-3.0.1.zip](https://github.com/Howe-Ren/smart-order-list/releases/download/3.0.1/Smart-Order-List-Reference-3.0.1.zip) from the release assets.
-2. Extract the ZIP and copy its `Smart Order List` folder into the root of your Obsidian vault.
-3. Under **Settings → Community plugins**, ensure **Smart Order List** is installed and enabled in that vault.
-4. Open `Smart Order List/README.md` in Obsidian.
-
-If your vault already has a `Smart Order List` folder, check for existing files before replacing them.
+#### Description 
+- **File hierarchy:** 
+  ```text
+  Smart Order List/
+  ├── README.md
+  └── Assets/
+      ├── Archive.md
+      └── attachments/
+  ``` 
+- What is the package: 
+	- The author's ([Howe-Ren](https://github.com/Howe-Ren)) full mindset journey on *Smart Order List* 
+	- The full reference for plugin: terminology, principles, examples, and development notes 
+- Who needs: 
+	- Repo README: Concise and simple, for **basic** usage 
+	- Package README: Precise logic and detailed principles & instances, for **better** use 
+- How to use the package: Extract under vault's root and enable *Smart Order List*. Check details in *demonstrations* 
+#### Demonstration (video) 
+1. Where to **download** the package: [`Smart-Order-List-Reference-3.0.1.zip`](https://github.com/Howe-Ren/smart-order-list/releases/download/3.0.1/Smart-Order-List-Reference-3.0.1.zip) from [Release 3.0.1 page](https://github.com/Howe-Ren/smart-order-list/releases/tag/3.0.1) 
+2. How to **extract** the compressed package: Extract: Extracted > Enter decompression's root-dir > **Copy** folder `./Smart Order List` to vault's **root** path 
+3. How to make the package files **effective**: Enable the *plugin* 
 
 ## 4. Element table
 
