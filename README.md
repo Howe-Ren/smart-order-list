@@ -4,6 +4,23 @@ Smart Order List maintains ordered and nested list prefixes as you edit in Obsid
 
 <img src="assets/3.0-live-preview.png" alt="Nested list prefixes in Live Preview" width="420">
 
+> [!NOTE]
+> <details>
+> <summary><b>Lists Instance (code)</b> <kbd>Click to expand</kbd></summary>
+> 
+> ```text
+> 1. 1
+> 	- 2
+> 		1. 3
+> 			1.1 4
+> 	1.1 5
+> 		1.1.1 6
+> 			1.1.1.1 7
+> ```
+> 
+> </details>
+
+
 ## 1. Insight
 
 > the *Line*: exclusive to the lines of which the **meta-component** is *list*
@@ -53,7 +70,7 @@ For example, indenting the second item produces a nested prefix:
 
 ### 3.2 Full reference
 
-#### Description 
+#### 3.2.1 Description 
 - **File hierarchy:** 
   ```text
   Smart Order List/
@@ -69,7 +86,8 @@ For example, indenting the second item produces a nested prefix:
 	- Repo README: Concise and simple, for **basic** usage 
 	- Package README: Precise logic and detailed principles & instances, for **better** use 
 - How to use the package: Extract under vault's root and enable *Smart Order List*. Check details in *demonstrations* 
-#### Demonstration (video) 
+
+#### 3.2.2 Demonstration (video) 
 1. Where to **download** the package: [`Smart-Order-List-Reference-3.0.1.zip`](https://github.com/Howe-Ren/smart-order-list/releases/download/3.0.1/Smart-Order-List-Reference-3.0.1.zip) from [Release 3.0.1 page](https://github.com/Howe-Ren/smart-order-list/releases/tag/3.0.1) 
 2. How to **extract** the compressed package: Extract: Extracted > Enter decompression's root-dir > **Copy** folder `./Smart Order List` to vault's **root** path 
 3. How to make the package files **effective**: Enable the *plugin* 
