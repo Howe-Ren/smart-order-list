@@ -72,6 +72,8 @@ For example, indenting the second item produces a nested prefix:
 
 <a href="https://www.youtube.com/watch?v=L1OMx-YaDXA"><img src="https://i.ytimg.com/vi/L1OMx-YaDXA/maxresdefault.jpg" alt="Watch the Smart Order List full reference demonstration on YouTube" width="480"></a>
 
+[<kbd>Click the cover to watch on <strong>YouTube</strong></kbd>](https://www.youtube.com/watch?v=L1OMx-YaDXA)
+
 #### 3.2.1 Description 
 - **File hierarchy:** 
   ```text
